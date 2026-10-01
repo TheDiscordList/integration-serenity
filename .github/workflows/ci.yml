@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (Rust ${{ matrix.rust }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        rust: [stable, '1.74']
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install ${{ matrix.rust }} --profile minimal
+      - name: Resolve dependency versions that support Rust 1.74
+        if: matrix.rust != 'stable'
+        run: cargo +stable generate-lockfile
+        env:
+          CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: fallback
+      - run: cargo +${{ matrix.rust }} test --features webhooks
+      - name: Webhooks without serenity
+        run: cargo +${{ matrix.rust }} test --no-default-features --features webhooks --lib --tests
+      - name: native-tls backend
+        run: cargo +${{ matrix.rust }} check --no-default-features --features native-tls,webhooks
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --features webhooks -- -D warnings
+      - run: cargo clippy --no-default-features --features webhooks --lib --tests -- -D warnings
+      - run: cargo doc --no-deps --features webhooks
+        env:
+          RUSTDOCFLAGS: -D warnings

@@ -1,0 +1,55 @@
+[package]
+name = "thediscordlist-serenity"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+description = "Official TheDiscordList integration for serenity and poise: auto-post server count, shard heartbeats and slash commands, and verify inbound webhooks."
+license = "MIT"
+homepage = "https://thediscordlist.com"
+repository = "https://github.com/TheDiscordList/integration-serenity"
+documentation = "https://docs.rs/thediscordlist-serenity"
+readme = "README.md"
+keywords = ["discord", "serenity", "thediscordlist", "bot-list", "poise"]
+categories = ["api-bindings", "web-programming::http-client"]
+exclude = [".github/", "REPO_META.json"]
+
+[features]
+default = ["rustls-tls"]
+# The serenity autoposter. serenity refuses to build without a TLS backend,
+# so pick the one your bot uses; each selects the same backend in serenity
+# and in this crate's reqwest, so both share one HTTP and TLS build.
+autopost = ["dep:serenity", "dep:reqwest", "dep:tokio", "dep:tracing"]
+rustls-tls = ["autopost", "serenity/rustls_backend", "reqwest/rustls-tls"]
+native-tls = ["autopost", "serenity/native_tls_backend", "reqwest/native-tls"]
+# Inbound webhook verification. Needs nothing from serenity.
+webhooks = ["dep:hmac", "dep:sha2", "dep:subtle"]
+
+[dependencies]
+serde = { version = "1.0.185", features = ["derive"] }
+serde_json = "1.0.108"
+serenity = { version = "0.12", optional = true, default-features = false, features = ["client", "gateway", "model", "cache"] }
+reqwest = { version = "0.12", optional = true, default-features = false }
+tokio = { version = "1.34", optional = true, features = ["macros", "rt", "sync", "time"] }
+tracing = { version = "0.1.37", optional = true }
+hmac = { version = "0.12", optional = true }
+sha2 = { version = "0.10", optional = true }
+subtle = { version = "2.4", optional = true, default-features = false }
+
+[dev-dependencies]
+serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "model", "cache", "rustls_backend"] }
+tokio = { version = "1.34", features = ["io-util", "macros", "net", "rt-multi-thread"] }
+
+[[example]]
+name = "bot"
+required-features = ["autopost"]
+
+[[test]]
+name = "autopost"
+required-features = ["autopost"]
+
+[[test]]
+name = "webhooks"
+required-features = ["webhooks"]
+
+[package.metadata.docs.rs]
+features = ["webhooks"]

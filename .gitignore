@@ -1,0 +1,4 @@
+/target
+# A library: CI resolves fresh, and the MSRV job resolves for 1.74.
+Cargo.lock
+REPO_META.json
