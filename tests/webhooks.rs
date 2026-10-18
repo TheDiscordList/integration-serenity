@@ -76,6 +76,22 @@ fn the_wrong_secret_is_rejected() {
 }
 
 #[test]
+fn an_empty_secret_is_a_configuration_error() {
+    // A delivery forged with the empty key must not verify against an unset secret.
+    let forged = format!("t={T},v1={}", sign("", T, BODY));
+    for secret in ["", "   "] {
+        let result = verify_at(
+            BODY.as_bytes(),
+            Some(&forged),
+            secret,
+            DEFAULT_TOLERANCE,
+            at(T),
+        );
+        assert_eq!(result.unwrap_err(), WebhookError::MissingSecret);
+    }
+}
+
+#[test]
 fn stale_timestamps_are_rejected_in_both_directions() {
     let header = format!("t={T},v1={V1}");
     for now in [T + 301, T - 301] {
@@ -218,7 +234,20 @@ fn known_events_are_typed() {
 }
 
 #[test]
+fn bump_ready_is_typed() {
+    let body = r#"{"id":"d4","event":"listing.bump_ready","created_at":"2026-01-01T00:00:00+00:00","listing":{"id":"9","type":"server","name":"S","url":"https://thediscordlist.com/servers/9"},"data":{"ready_at":"2026-01-01T00:00:00+00:00"}}"#;
+    let header = format!("t={T},v1={}", sign(SECRET, T, body));
+
+    let EventData::ListingBumpReady(ready) = check(body, &header).unwrap().data else {
+        panic!("expected a typed bump_ready");
+    };
+
+    assert_eq!(ready.ready_at, "2026-01-01T00:00:00+00:00");
+}
+
+#[test]
 fn error_codes_are_machine_readable() {
+    assert_eq!(WebhookError::MissingSecret.code(), "MISSING_SECRET");
     assert_eq!(WebhookError::MissingSignature.code(), "MISSING_SIGNATURE");
     assert_eq!(
         WebhookError::MalformedSignature.code(),

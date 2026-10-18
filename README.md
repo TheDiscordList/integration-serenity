@@ -235,13 +235,16 @@ match webhooks::verify(raw_body, signature_header, secret) {
 `raw_body` must be the exact bytes that arrived. Re-serialising a parsed body
 re-escapes slashes and non-ASCII and can never verify: the signature covers
 bytes, not meaning. The timestamp must be within 300 s of now in either
-direction; `webhooks::verify_at` takes another tolerance and clock.
+direction; `webhooks::verify_at` takes another tolerance and clock. An empty
+or blank `secret` is refused with `WebhookError::MissingSecret` rather than
+checked against an empty key, so a missing environment variable fails closed.
 
 ### Events
 
 | `event.event` | `event.data` |
 | --- | --- |
 | `listing.bumped` | `EventData::ListingBumped` |
+| `listing.bump_ready` | `EventData::ListingBumpReady` |
 | `listing.upvoted` | `EventData::ListingUpvoted` |
 | `server.joined` | `EventData::ServerJoined`, server listings only |
 | `bot.added` | `EventData::BotAdded` |
