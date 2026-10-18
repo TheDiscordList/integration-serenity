@@ -170,6 +170,22 @@ async fn heartbeat_cadence_follows_the_server_grace_window() {
 }
 
 #[tokio::test]
+async fn out_of_band_beats_keep_ten_seconds_from_the_last_beat() {
+    let server = MockServer::ok().await;
+    let poster = builder(&server, &Events::default()).build();
+    ready(&poster, &server, 0, 1);
+
+    let before = Instant::now();
+    assert!(poster.post_heartbeat().await.ok);
+    let next = poster.inner.out_of_band_beat().unwrap();
+    assert!(next >= before + Duration::from_secs(10), "{next:?}");
+
+    poster.inner.state().last_beat_at = Instant::now().checked_sub(Duration::from_secs(20));
+    let next = poster.inner.out_of_band_beat().unwrap();
+    assert!(next <= Instant::now() + Duration::from_secs(1), "{next:?}");
+}
+
+#[tokio::test]
 async fn a_cluster_override_is_reported_verbatim() {
     let server = MockServer::ok().await;
     let poster = builder(&server, &Events::default()).cluster(2, 4).build();
@@ -460,6 +476,35 @@ async fn persistent_server_errors_stop_after_three_attempts() {
             ..
         }]
     ));
+}
+
+#[tokio::test]
+async fn retries_never_run_past_the_next_tick() {
+    let server = MockServer::start(|_| Reply::new(503, "")).await;
+    let mut builder = builder(&server, &Events::default());
+    // A first backoff of 30-60 s cannot fit before the next 30 s heartbeat.
+    builder.config.retry_base = Duration::from_secs(60);
+    let poster = builder.build();
+    ready(&poster, &server, 0, 1);
+
+    let result = tokio::time::timeout(Duration::from_secs(5), poster.post_heartbeat())
+        .await
+        .expect("the retry waited past the next tick");
+
+    assert_eq!(result, PostResult::failed(Some(503)));
+    assert_eq!(server.posts().len(), 1);
+}
+
+#[tokio::test]
+async fn client_errors_other_than_408_and_425_are_not_retried() {
+    for (status, attempts) in [(413, 1), (408, 3), (425, 3)] {
+        let server = MockServer::start(move |_| Reply::new(status, "{}")).await;
+        let poster = builder(&server, &Events::default()).build();
+        ready(&poster, &server, 0, 1);
+
+        assert_eq!(poster.post_heartbeat().await.status, Some(status));
+        assert_eq!(server.posts().len(), attempts, "{status}");
+    }
 }
 
 #[tokio::test]

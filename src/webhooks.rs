@@ -44,6 +44,9 @@ pub const DEFAULT_TOLERANCE: Duration = Duration::from_secs(300);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum WebhookError {
+    /// The secret is empty: a configuration error on your side, not a bad delivery.
+    /// Every delivery fails until it is set.
+    MissingSecret,
     /// No `X-TDL-Signature` header.
     MissingSignature,
     /// The header has no numeric `t` or no `v1`.
@@ -61,6 +64,7 @@ impl WebhookError {
     #[must_use]
     pub fn code(self) -> &'static str {
         match self {
+            Self::MissingSecret => "MISSING_SECRET",
             Self::MissingSignature => "MISSING_SIGNATURE",
             Self::MalformedSignature => "MALFORMED_SIGNATURE",
             Self::StaleTimestamp => "STALE_TIMESTAMP",
@@ -73,6 +77,7 @@ impl WebhookError {
 impl fmt::Display for WebhookError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
+            Self::MissingSecret => "the webhook secret is empty, so no delivery can be verified",
             Self::MissingSignature => "missing X-TDL-Signature header",
             Self::MalformedSignature => "malformed X-TDL-Signature header",
             Self::StaleTimestamp => "webhook timestamp outside the tolerance window",
@@ -135,13 +140,15 @@ pub enum ListingKind {
 pub enum EventData {
     /// `listing.bumped`
     ListingBumped(ListingBumped),
+    /// `listing.bump_ready`: the cooldown lifted. Sent once per cooldown.
+    ListingBumpReady(ListingBumpReady),
     /// `listing.upvoted`
     ListingUpvoted(ListingUpvoted),
     /// `server.joined`: server listings only.
     ServerJoined(ServerJoined),
     /// `bot.added`: a click on the install hand-off. Discord never reports whether the install completed.
     BotAdded(BotAdded),
-    /// `bot.stats_reported`: also fires on owner edits in the web UI, not only on your own posts.
+    /// `bot.stats_reported`: also fires on owner edits in the web UI and on the heartbeat's stats forward.
     BotStatsReported(BotStatsReported),
     /// `webhook.ping`
     WebhookPing(WebhookPing),
@@ -173,6 +180,14 @@ pub struct ListingBumped {
     pub next_bump_at: String,
     /// Who bumped.
     pub user: Option<WebhookUser>,
+}
+
+/// `data` of `listing.bump_ready`.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ListingBumpReady {
+    /// ISO 8601.
+    pub ready_at: String,
 }
 
 /// `data` of `listing.upvoted`.
@@ -271,6 +286,9 @@ pub fn verify_at(
     tolerance: Duration,
     now: SystemTime,
 ) -> Result<WebhookEvent, WebhookError> {
+    if secret.trim().is_empty() {
+        return Err(WebhookError::MissingSecret);
+    }
     let header = signature
         .filter(|header| !header.trim().is_empty())
         .ok_or(WebhookError::MissingSignature)?;
@@ -342,6 +360,7 @@ fn typed(event: &str, data: Value) -> EventData {
     }
     let known = match event {
         "listing.bumped" => parse(&data, EventData::ListingBumped),
+        "listing.bump_ready" => parse(&data, EventData::ListingBumpReady),
         "listing.upvoted" => parse(&data, EventData::ListingUpvoted),
         "server.joined" => parse(&data, EventData::ServerJoined),
         "bot.added" => parse(&data, EventData::BotAdded),
