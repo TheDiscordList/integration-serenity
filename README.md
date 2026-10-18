@@ -282,12 +282,11 @@ the heartbeat's internal stats forward.
   suspends and reprobes every 30 minutes rather than disabling: the tier is
   derived per request, so a bot can gain it mid-run.
 - **Rate limits are shared.** Stats and commands share 60 requests per minute
-  per client IP; heartbeats have 120. This crate keeps one client-side `429`
+  per bot; heartbeats have 120. This crate keeps one client-side `429`
   suspension (`Retry-After`, `X-RateLimit-Reset`, plus jitter; 60 s without
   either, never more than an hour) for stats and
   commands, and heartbeats bypass it: a stale number beats a false "down" on
-  your status page. On shared hosting, other bots behind the same egress IP
-  count against you.
+  your status page.
 - **`404` never means "bad token".** It means the id is unknown or belongs to
   a server listing, and disables only that publisher. A `401` disables all
   three.

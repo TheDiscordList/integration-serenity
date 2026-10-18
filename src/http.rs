@@ -44,8 +44,8 @@ pub(crate) enum Outcome {
     Dropped,
 }
 
-/// One suspension for the whole client, because the server keeps a single
-/// rate-limit counter per client IP. Heartbeats bypass it: a dropped stats
+/// One suspension for the whole client, because the server counts stats and
+/// commands against one per-bot budget. Heartbeats bypass it: a dropped stats
 /// post is a stale number, a dropped heartbeat is a false "down".
 pub(crate) struct Api {
     client: reqwest::Client,
