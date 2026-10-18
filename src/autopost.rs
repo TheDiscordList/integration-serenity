@@ -38,6 +38,8 @@ const HEARTBEAT_MIN_INTERVAL: Duration = Duration::from_secs(15);
 const HEARTBEAT_MAX_INTERVAL: Duration = Duration::from_secs(60);
 const HEARTBEAT_JITTER: Duration = Duration::from_secs(5);
 const HEARTBEAT_MIN_DELAY: Duration = Duration::from_secs(1);
+/// The floor between an out-of-band beat and the one before it.
+const HEARTBEAT_OUT_OF_BAND_GAP: Duration = Duration::from_secs(10);
 
 /// Offset from the first stats post: the two share one server-side rate budget.
 const COMMANDS_DELAY: Duration = Duration::from_secs(10);
@@ -547,6 +549,7 @@ struct State {
     ready_at: Option<Instant>,
     last_stats_at: Option<Instant>,
     last_stats: Option<(u64, Option<u32>)>,
+    last_beat_at: Option<Instant>,
     heartbeat_interval: Duration,
     warned: HashSet<&'static str>,
 }
@@ -562,6 +565,7 @@ impl State {
             ready_at: None,
             last_stats_at: None,
             last_stats: None,
+            last_beat_at: None,
             heartbeat_interval,
             warned: HashSet::new(),
         }
@@ -881,7 +885,12 @@ impl Inner {
             shard_count: total_shards,
         };
         let (result, _) = self
-            .send(Publisher::Stats, &format!("/bots/{bot_id}/stats"), &body)
+            .send(
+                Publisher::Stats,
+                &format!("/bots/{bot_id}/stats"),
+                &body,
+                Some(self.config.stats_interval),
+            )
             .await;
         if result.ok {
             self.state().last_stats = Some((server_count, total_shards));
@@ -957,11 +966,17 @@ impl Inner {
                 .collect(),
         };
 
+        let interval = {
+            let mut state = self.state();
+            state.last_beat_at = Some(Instant::now());
+            state.heartbeat_interval
+        };
         let (result, response) = self
             .send(
                 Publisher::Heartbeat,
                 &format!("/bots/{bot_id}/heartbeat"),
                 &body,
+                Some(interval),
             )
             .await;
 
@@ -990,6 +1005,21 @@ impl Inner {
         let jitter = HEARTBEAT_JITTER.mul_f64(random_unit());
         let next =
             (started + state.heartbeat_interval + jitter).max(Instant::now() + HEARTBEAT_MIN_DELAY);
+        Some(gate.suspended_until.map_or(next, |until| next.max(until)))
+    }
+
+    /// When a shard transition's out-of-band beat goes out: soon, but never within
+    /// 10 s of the previous beat, so a flapping shard cannot outpace the rate limit.
+    fn out_of_band_beat(&self) -> Option<Instant> {
+        let state = self.state();
+        let gate = &state.gates[Publisher::Heartbeat as usize];
+        if gate.disabled.is_some() {
+            return None;
+        }
+        let soon = Instant::now() + HEARTBEAT_MIN_DELAY;
+        let next = state
+            .last_beat_at
+            .map_or(soon, |at| soon.max(at + HEARTBEAT_OUT_OF_BAND_GAP));
         Some(gate.suspended_until.map_or(next, |until| next.max(until)))
     }
 
@@ -1038,21 +1068,26 @@ impl Inner {
             Publisher::Commands,
             &format!("/bots/{bot_id}/commands"),
             &body,
+            None,
         )
         .await
         .0
     }
 
     /// One request, retrying only transient failures, at most three attempts.
+    /// A retry that would land past the next scheduled run is dropped: that
+    /// run carries fresher data, and a failed request still burns rate-limit budget.
     async fn send(
         &self,
         publisher: Publisher,
         path: &str,
         body: &(impl Serialize + Sync),
+        next_run_in: Option<Duration>,
     ) -> (PostResult, Option<Value>) {
         let Some(api) = &self.api else {
             return (PostResult::skip(Skip::NoToken), None);
         };
+        let next_run = next_run_in.map(|delay| Instant::now() + delay);
         let mut attempt = 0;
         loop {
             let outcome = api
@@ -1060,8 +1095,11 @@ impl Inner {
                 .await;
             attempt += 1;
             if attempt < MAX_ATTEMPTS && matches!(outcome, Outcome::Transient { .. }) {
-                sleep(backoff(attempt - 1, self.config.retry_base)).await;
-                continue;
+                let delay = backoff(attempt - 1, self.config.retry_base);
+                if !next_run.is_some_and(|at| Instant::now() + delay >= at) {
+                    sleep(delay).await;
+                    continue;
+                }
             }
             return self.react(publisher, outcome);
         }
@@ -1201,12 +1239,7 @@ async fn heartbeat_loop(inner: Weak<Inner>, wake: Arc<Notify>) {
             () = wake.notified() => {
                 // Shard transitions beat out of band; a burst coalesces into one.
                 let Some(inner) = inner.upgrade() else { return };
-                let state = inner.state();
-                let gate = &state.gates[Publisher::Heartbeat as usize];
-                next = gate.disabled.is_none().then(|| {
-                    let soon = Instant::now() + HEARTBEAT_MIN_DELAY;
-                    gate.suspended_until.map_or(soon, |until| soon.max(until))
-                });
+                next = inner.out_of_band_beat();
             }
         }
     }

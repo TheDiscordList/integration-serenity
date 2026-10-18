@@ -41,7 +41,7 @@ next to yours and starts on the first `READY`. It runs three publishers:
 | Publisher | What it sends | Cadence |
 | --- | --- | --- |
 | Stats | `server_count`, `shard_count` | 5 s after `READY`, then every 5 min, debounced 20 s on guild join/leave |
-| Heartbeat | per-shard status, latency and guild counts | right after `READY`, then every ~30 s, plus ~1 s after any shard stage change |
+| Heartbeat | per-shard status, latency and guild counts | right after `READY`, then every ~30 s, plus an extra beat on any shard stage change, at least 10 s after the last one |
 | Commands | your global application commands | once, ~10 s after `READY` |
 
 `attach_shard_manager` is optional. With it, heartbeats read each shard's
@@ -283,13 +283,17 @@ the heartbeat's internal stats forward.
   derived per request, so a bot can gain it mid-run.
 - **Rate limits are shared.** Stats and commands share 60 requests per minute
   per client IP; heartbeats have 120. This crate keeps one client-side `429`
-  suspension (`Retry-After`, `X-RateLimit-Reset`, plus jitter) for stats and
+  suspension (`Retry-After`, `X-RateLimit-Reset`, plus jitter; 60 s without
+  either, never more than an hour) for stats and
   commands, and heartbeats bypass it: a stale number beats a false "down" on
   your status page. On shared hosting, other bots behind the same egress IP
   count against you.
 - **`404` never means "bad token".** It means the id is unknown or belongs to
   a server listing, and disables only that publisher. A `401` disables all
   three.
+- `408`, `425`, `5xx`, timeouts (10 s) and network errors retry up to three
+  times with jittered exponential backoff, never past the next scheduled run.
+  Any other `4xx` is reported once and not retried.
 - **Unchanged counts are not re-sent** for 30 minutes: every stats POST
   re-indexes the listing and fires a `bot.stats_reported` webhook.
 - **Only global commands are published.** Guild-scoped commands are not part

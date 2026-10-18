@@ -29,7 +29,7 @@ pub(crate) enum Outcome {
         status: u16,
         body: Value,
     },
-    /// 400/422: this payload will never succeed.
+    /// Any 4xx without a meaning of its own, 408 and 425 aside: retrying it cannot succeed.
     Payload(u16),
     Auth,
     Plan,
@@ -133,8 +133,9 @@ impl Api {
             401 => Outcome::Auth,
             403 => Outcome::Plan,
             404 | 409 => Outcome::Config(status),
-            400 | 422 => Outcome::Payload(status),
             429 => Outcome::Throttled,
+            // 408 and 425 may pass on a retry; any other 4xx fails the same way again.
+            400..=499 if status != 408 && status != 425 => Outcome::Payload(status),
             _ => Outcome::Transient {
                 status: Some(status),
                 message: format!("TheDiscordList responded {status}."),
