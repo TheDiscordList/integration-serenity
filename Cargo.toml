@@ -1,6 +1,6 @@
 [package]
 name = "thediscordlist-serenity"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.74"
 description = "Official TheDiscordList integration for serenity and poise: auto-post server count, shard heartbeats and slash commands, and verify inbound webhooks."
