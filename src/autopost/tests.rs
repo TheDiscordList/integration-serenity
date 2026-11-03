@@ -608,6 +608,24 @@ async fn stats_respect_the_minimum_gap_and_skip_unchanged_counts() {
 }
 
 #[tokio::test]
+async fn stats_wait_for_every_local_shard_to_be_ready() {
+    let server = MockServer::ok().await;
+    let poster = builder(&server, &Events::default()).build();
+    ready(&poster, &server, 0, 2);
+    poster.inner.on_stage(1, ConnectionStage::Identifying);
+
+    assert_eq!(
+        poster.post_stats().await,
+        PostResult::skip(Skip::Unmeasurable)
+    );
+    assert!(server.posts().is_empty());
+
+    poster.inner.on_stage(1, ConnectionStage::Connected);
+
+    assert!(poster.post_stats().await.ok);
+}
+
+#[tokio::test]
 async fn only_cluster_zero_publishes_stats() {
     let server = MockServer::ok().await;
 

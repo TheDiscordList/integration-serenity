@@ -830,6 +830,10 @@ impl Inner {
             }
             return Err(Skip::Unmeasurable);
         }
+        // The cache only holds a shard's guilds from its READY on, so a boot would undercount.
+        if local.iter().any(|shard| shard.status != ShardStatus::Ready) {
+            return Err(Skip::Unmeasurable);
+        }
         let cache = self
             .state()
             .handles
