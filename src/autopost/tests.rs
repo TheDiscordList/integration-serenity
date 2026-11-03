@@ -435,6 +435,39 @@ async fn throttling_suspends_stats_and_commands_but_not_heartbeats() {
 }
 
 #[tokio::test]
+async fn a_scheduled_post_retries_a_rate_limit_once_the_window_lifts() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&calls);
+    let server = MockServer::start(move |_| {
+        if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+            Reply::new(429, "{}").header("retry-after", "1")
+        } else {
+            Reply::new(200, "{}")
+        }
+    })
+    .await;
+    let poster = builder(&server, &Events::default()).build();
+    ready(&poster, &server, 0, 1);
+
+    assert!(poster.inner.publish_stats(false).await.ok);
+    assert_eq!(server.posts().len(), 2);
+}
+
+#[tokio::test]
+async fn a_rate_limit_past_the_next_run_is_left_to_that_run() {
+    let server = MockServer::start(|_| Reply::new(429, "{}").header("retry-after", "120")).await;
+    let poster = builder(&server, &Events::default()).build();
+    ready(&poster, &server, 0, 1);
+
+    let result = tokio::time::timeout(Duration::from_secs(5), poster.inner.beat(false))
+        .await
+        .expect("the retry waited past the next run");
+
+    assert_eq!(result, throttled());
+    assert_eq!(server.posts().len(), 1);
+}
+
+#[tokio::test]
 async fn a_throttled_heartbeat_leaves_stats_and_commands_alone() {
     let server = MockServer::start(|request| {
         if request.path.ends_with("/heartbeat") {

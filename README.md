@@ -292,6 +292,9 @@ the heartbeat's internal stats forward.
 - `408`, `425`, `5xx`, timeouts (10 s) and network errors retry up to three
   times with jittered exponential backoff, never past the next scheduled run.
   Any other `4xx` is reported once and not retried.
+- A scheduled post that gets a `429` retries once the window lifts, if that
+  lands before its next run. A manual `post_*` returns `Skip::Throttled` at once,
+  so awaiting it never holds a command handler for the length of the window.
 - **Unchanged counts are not re-sent** for 30 minutes: every stats POST
   re-indexes the listing and fires a `bot.stats_reported` webhook.
 - **Only global commands are published.** Guild-scoped commands are not part

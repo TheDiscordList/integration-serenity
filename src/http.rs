@@ -35,7 +35,9 @@ pub(crate) enum Outcome {
     Plan,
     /// 404/409. A 404 means an unknown id or a server listing, never a bad token.
     Config(u16),
-    Throttled,
+    Throttled {
+        retry_after: Duration,
+    },
     Transient {
         status: Option<u16>,
         message: String,
@@ -112,8 +114,9 @@ impl Api {
         };
 
         let status = response.status().as_u16();
-        if status == 429 && !heartbeat {
-            self.suspend(response.headers());
+        let retry_after = (status == 429).then(|| retry_window(response.headers()));
+        if let Some(wait) = retry_after.filter(|_| !heartbeat) {
+            *lock(&self.suspended_until) = Some(Instant::now() + wait);
         }
 
         let bytes = match response.bytes().await {
@@ -134,7 +137,9 @@ impl Api {
             401 => Outcome::Auth,
             403 => Outcome::Plan,
             404 | 409 => Outcome::Config(status),
-            429 => Outcome::Throttled,
+            429 => Outcome::Throttled {
+                retry_after: retry_after.unwrap_or(DEFAULT_RETRY_AFTER),
+            },
             // 408 and 425 may pass on a retry; any other 4xx fails the same way again.
             400..=499 if status != 408 && status != 425 => Outcome::Payload(status),
             _ => Outcome::Transient {
@@ -143,35 +148,33 @@ impl Api {
             },
         }
     }
+}
 
-    /// Honours `Retry-After` (seconds, default 60) and `X-RateLimit-Reset`
-    /// (unix seconds), whichever ends later, plus up to 2 s of jitter.
-    fn suspend(&self, headers: &HeaderMap) {
-        let seconds = |name: &str| {
-            headers
-                .get(name)
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.trim().parse::<u64>().ok())
-                .filter(|value| *value > 0)
-        };
+/// Honours `Retry-After` (seconds, default 60) and `X-RateLimit-Reset`
+/// (unix seconds), whichever ends later, plus up to 2 s of jitter.
+fn retry_window(headers: &HeaderMap) -> Duration {
+    let seconds = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .filter(|value| *value > 0)
+    };
 
-        let now = Instant::now();
-        let retry_after = seconds("retry-after").map_or(DEFAULT_RETRY_AFTER, |secs| {
-            Duration::from_secs(secs.min(MAX_SUSPENSION_SECS))
-        });
-        let mut until = now + retry_after;
+    let mut wait = seconds("retry-after").map_or(DEFAULT_RETRY_AFTER, |secs| {
+        Duration::from_secs(secs.min(MAX_SUSPENSION_SECS))
+    });
 
-        if let Some(reset) = seconds("x-ratelimit-reset") {
-            let unix_now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            let wait = reset.saturating_sub(unix_now).min(MAX_SUSPENSION_SECS);
-            until = until.max(now + Duration::from_secs(wait));
-        }
-
-        *lock(&self.suspended_until) = Some(until + Duration::from_secs(2).mul_f64(random_unit()));
+    if let Some(reset) = seconds("x-ratelimit-reset") {
+        let unix_now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let until_reset = reset.saturating_sub(unix_now).min(MAX_SUSPENSION_SECS);
+        wait = wait.max(Duration::from_secs(until_reset));
     }
+
+    wait + Duration::from_secs(2).mul_f64(random_unit())
 }
 
 /// `min(base * 2^attempt, 30 * base)`, scaled by a random factor in `[0.5, 1.0]`.

@@ -893,6 +893,7 @@ impl Inner {
                 Publisher::Stats,
                 &format!("/bots/{bot_id}/stats"),
                 &body,
+                manual,
                 Some(self.config.stats_interval),
             )
             .await;
@@ -982,6 +983,7 @@ impl Inner {
                 Publisher::Heartbeat,
                 &format!("/bots/{bot_id}/heartbeat"),
                 &body,
+                manual,
                 Some(interval),
             )
             .await;
@@ -1074,20 +1076,24 @@ impl Inner {
             Publisher::Commands,
             &format!("/bots/{bot_id}/commands"),
             &body,
+            manual,
             None,
         )
         .await
         .0
     }
 
-    /// One request, retrying only transient failures, at most three attempts.
-    /// A retry that would land past the next scheduled run is dropped: that
-    /// run carries fresher data, and a failed request still burns rate-limit budget.
+    /// One request, retrying transient failures and, once its window lifts, a 429,
+    /// at most three attempts. A retry that would land past the next scheduled run
+    /// is dropped: that run carries fresher data, and a failed request still burns
+    /// rate-limit budget. A manual post answers a 429 at once: its caller may be a
+    /// command handler, and a window can run for minutes.
     async fn send(
         &self,
         publisher: Publisher,
         path: &str,
         body: &(impl Serialize + Sync),
+        manual: bool,
         next_run_in: Option<Duration>,
     ) -> (PostResult, Option<Value>) {
         let Some(api) = &self.api else {
@@ -1100,12 +1106,17 @@ impl Inner {
                 .post(path, body, publisher == Publisher::Heartbeat)
                 .await;
             attempt += 1;
-            if attempt < MAX_ATTEMPTS && matches!(outcome, Outcome::Transient { .. }) {
-                let delay = backoff(attempt - 1, self.config.retry_base);
-                if !next_run.is_some_and(|at| Instant::now() + delay >= at) {
-                    sleep(delay).await;
-                    continue;
-                }
+            let retry = match outcome {
+                Outcome::Transient { .. } => Some(backoff(attempt - 1, self.config.retry_base)),
+                Outcome::Throttled { retry_after } if !manual => Some(retry_after),
+                _ => None,
+            }
+            .filter(|delay| {
+                attempt < MAX_ATTEMPTS && !next_run.is_some_and(|at| Instant::now() + *delay >= at)
+            });
+            if let Some(delay) = retry {
+                sleep(delay).await;
+                continue;
             }
             return self.react(publisher, outcome);
         }
@@ -1176,7 +1187,7 @@ impl Inner {
                 );
                 (PostResult::failed(Some(status)), None)
             }
-            Outcome::Throttled => (
+            Outcome::Throttled { .. } => (
                 PostResult {
                     ok: false,
                     status: Some(429),
