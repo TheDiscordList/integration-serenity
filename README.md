@@ -281,12 +281,11 @@ the heartbeat's internal stats forward.
 - **Heartbeats need Gold or higher.** On a `403` the heartbeat publisher
   suspends and reprobes every 30 minutes rather than disabling: the tier is
   derived per request, so a bot can gain it mid-run.
-- **Rate limits are shared.** Stats and commands share 60 requests per minute
-  per bot; heartbeats have 120. This crate keeps one client-side `429`
-  suspension (`Retry-After`, `X-RateLimit-Reset`, plus jitter; 60 s without
-  either, never more than an hour) for stats and
-  commands, and heartbeats bypass it: a stale number beats a false "down" on
-  your status page.
+- **Stats and commands share a rate limit** of 60 requests per minute per bot.
+  A `429` on either suspends both (`Retry-After`, `X-RateLimit-Reset`, plus
+  jitter; 60 s without either, never more than an hour). Heartbeats have a
+  limiter of their own, so they neither start nor honour that suspension: a
+  stale number beats a false "down" on your status page.
 - **`404` never means "bad token".** It means the id is unknown or belongs to
   a server listing, and disables only that publisher. A `401` disables all
   three.

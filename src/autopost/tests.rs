@@ -435,6 +435,28 @@ async fn throttling_suspends_stats_and_commands_but_not_heartbeats() {
 }
 
 #[tokio::test]
+async fn a_throttled_heartbeat_leaves_stats_and_commands_alone() {
+    let server = MockServer::start(|request| {
+        if request.path.ends_with("/heartbeat") {
+            Reply::new(429, "{}").header("retry-after", "120")
+        } else if request.method == "GET" {
+            Reply::new(200, COMMANDS_JSON)
+        } else {
+            Reply::new(200, "{}")
+        }
+    })
+    .await;
+    let poster = builder(&server, &Events::default()).build();
+    ready(&poster, &server, 0, 1);
+
+    assert_eq!(poster.post_heartbeat().await, throttled());
+
+    assert_eq!(poster.inner.api.as_ref().unwrap().suspended_until(), None);
+    assert!(poster.post_stats().await.ok);
+    assert!(poster.post_commands().await.ok);
+}
+
+#[tokio::test]
 async fn throttling_honours_the_rate_limit_reset_header() {
     let reset = SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

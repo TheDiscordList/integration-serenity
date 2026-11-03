@@ -45,8 +45,9 @@ pub(crate) enum Outcome {
 }
 
 /// One suspension for the whole client, because the server counts stats and
-/// commands against one per-bot budget. Heartbeats bypass it: a dropped stats
-/// post is a stale number, a dropped heartbeat is a false "down".
+/// commands against one per-bot budget. Heartbeats have a limiter of their own,
+/// so they neither start nor honour it: a dropped stats post is a stale number,
+/// a dropped heartbeat is a false "down".
 pub(crate) struct Api {
     client: reqwest::Client,
     base_url: String,
@@ -111,7 +112,7 @@ impl Api {
         };
 
         let status = response.status().as_u16();
-        if status == 429 {
+        if status == 429 && !heartbeat {
             self.suspend(response.headers());
         }
 
