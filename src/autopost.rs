@@ -43,6 +43,8 @@ const HEARTBEAT_OUT_OF_BAND_GAP: Duration = Duration::from_secs(10);
 
 /// Offset from the first stats post: the two share one server-side rate budget.
 const COMMANDS_DELAY: Duration = Duration::from_secs(10);
+/// How long after a failure that may pass the post is tried again.
+const COMMANDS_RETRY: Duration = Duration::from_secs(300);
 /// The Gold tier is derived per request, so a bot can gain it mid-run.
 const PLAN_REPROBE: Duration = Duration::from_secs(1800);
 /// serenity's shard queuer boots one shard per 5 s.
@@ -219,6 +221,7 @@ struct Config {
     cluster: Option<(u32, u32)>,
     stats_first_delay: Duration,
     commands_delay: Duration,
+    commands_retry: Duration,
     retry_base: Duration,
 }
 
@@ -238,6 +241,7 @@ impl Default for Config {
             cluster: None,
             stats_first_delay: STATS_FIRST_DELAY,
             commands_delay: COMMANDS_DELAY,
+            commands_retry: COMMANDS_RETRY,
             retry_base: Duration::from_secs(1),
         }
     }
@@ -679,7 +683,7 @@ impl Inner {
             )));
         }
         if self.config.commands {
-            tasks.push(tokio::spawn(commands_once(Arc::downgrade(self))));
+            tasks.push(tokio::spawn(commands_loop(Arc::downgrade(self))));
         }
     }
 
@@ -1077,7 +1081,7 @@ impl Inner {
             &format!("/bots/{bot_id}/commands"),
             &body,
             manual,
-            None,
+            Some(self.config.commands_retry),
         )
         .await
         .0
@@ -1262,13 +1266,35 @@ async fn heartbeat_loop(inner: Weak<Inner>, wake: Arc<Notify>) {
     }
 }
 
-async fn commands_once(inner: Weak<Inner>) {
-    let Some(delay) = inner.upgrade().map(|inner| inner.config.commands_delay) else {
+/// Once per process, until it lands: commands change on deploy, and a deploy is a restart.
+async fn commands_loop(inner: Weak<Inner>) {
+    let Some((mut delay, retry)) = inner
+        .upgrade()
+        .map(|inner| (inner.config.commands_delay, inner.config.commands_retry))
+    else {
         return;
     };
-    sleep(delay).await;
-    if let Some(inner) = inner.upgrade() {
-        inner.publish_commands(false).await;
+    loop {
+        sleep(delay).await;
+        let Some(inner) = inner.upgrade() else { return };
+        if commands_settled(&inner.publish_commands(false).await) {
+            return;
+        }
+        delay = retry;
+    }
+}
+
+/// A success, or an answer that asking again cannot change.
+fn commands_settled(result: &PostResult) -> bool {
+    match result.skipped {
+        Some(Skip::Empty | Skip::NotElected | Skip::Disabled) => true,
+        Some(_) => false,
+        None => {
+            result.ok
+                || result.status.is_some_and(|status| {
+                    (400..500).contains(&status) && !matches!(status, 408 | 425)
+                })
+        }
     }
 }
 

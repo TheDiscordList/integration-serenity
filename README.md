@@ -42,7 +42,7 @@ next to yours and starts on the first `READY`. It runs three publishers:
 | --- | --- | --- |
 | Stats | `server_count`, `shard_count` | 5 s after `READY`, then every 5 min, debounced 20 s on guild join/leave |
 | Heartbeat | per-shard status, latency and guild counts | right after `READY`, then every ~30 s, plus an extra beat on any shard stage change, at least 10 s after the last one |
-| Commands | your global application commands | once, ~10 s after `READY` |
+| Commands | your global application commands | once, ~10 s after `READY`; again every 5 min until it lands, after a server error, a rate limit or a failed fetch from Discord |
 
 `attach_shard_manager` is optional. With it, heartbeats read each shard's
 stage and latency from serenity's shard runners; without it they track stages

@@ -75,6 +75,11 @@ impl Api {
         *lock(&self.suspended_until)
     }
 
+    #[cfg(test)]
+    pub(crate) fn suspended_until_mut(&self) -> &Mutex<Option<Instant>> {
+        &self.suspended_until
+    }
+
     pub(crate) async fn post(
         &self,
         path: &str,

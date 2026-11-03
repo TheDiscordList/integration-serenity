@@ -767,6 +767,114 @@ async fn ready_starts_all_three_publishers_and_stop_ends_them() {
     assert!(lock(&poster.inner.tasks).is_empty());
 }
 
+fn commands_only(server: &MockServer) -> Autoposter {
+    let mut builder = builder(server, &Events::default())
+        .stats(false)
+        .heartbeat(false);
+    builder.config.commands_delay = Duration::ZERO;
+    builder.config.commands_retry = Duration::from_millis(20);
+    builder.build()
+}
+
+#[tokio::test]
+async fn commands_come_back_after_a_server_error_until_they_land() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&calls);
+    let server = MockServer::start(move |request| {
+        if request.method == "GET" {
+            Reply::new(200, COMMANDS_JSON)
+        } else if counter.fetch_add(1, Ordering::SeqCst) < 3 {
+            Reply::new(503, "{}")
+        } else {
+            Reply::new(200, "{}")
+        }
+    })
+    .await;
+    let poster = commands_only(&server);
+
+    poster.inner.on_ready(handles(&server), APP_ID, 0, 1);
+
+    server.wait_for_posts(4, Duration::from_secs(5)).await;
+    sleep(Duration::from_millis(100)).await;
+    assert_eq!(server.posts().len(), 4);
+}
+
+#[tokio::test]
+async fn commands_come_back_after_a_failed_fetch_from_discord() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&calls);
+    let server = MockServer::start(move |request| {
+        if request.method != "GET" {
+            Reply::new(200, "{}")
+        } else if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+            Reply::new(500, "{}")
+        } else {
+            Reply::new(200, COMMANDS_JSON)
+        }
+    })
+    .await;
+    let poster = commands_only(&server);
+
+    poster.inner.on_ready(handles(&server), APP_ID, 0, 1);
+
+    server.wait_for_posts(1, Duration::from_secs(5)).await;
+}
+
+#[tokio::test]
+async fn commands_come_back_after_the_suspension_dropped_them() {
+    let server = MockServer::start(|request| match request.method.as_str() {
+        "GET" => Reply::new(200, COMMANDS_JSON),
+        _ => Reply::new(200, "{}"),
+    })
+    .await;
+    let poster = commands_only(&server);
+    *lock(poster.inner.api.as_ref().unwrap().suspended_until_mut()) =
+        Some(Instant::now() + Duration::from_millis(50));
+
+    poster.inner.on_ready(handles(&server), APP_ID, 0, 1);
+
+    server.wait_for_posts(1, Duration::from_secs(5)).await;
+}
+
+#[tokio::test]
+async fn a_terminal_client_error_ends_the_command_retries() {
+    for status in [422, 404, 401] {
+        let server = MockServer::start(move |request| match request.method.as_str() {
+            "GET" => Reply::new(200, COMMANDS_JSON),
+            _ => Reply::new(status, "{}"),
+        })
+        .await;
+        let poster = commands_only(&server);
+
+        poster.inner.on_ready(handles(&server), APP_ID, 0, 1);
+
+        server.wait_for_posts(1, Duration::from_secs(5)).await;
+        sleep(Duration::from_millis(100)).await;
+        assert_eq!(server.posts().len(), 1, "{status}");
+    }
+}
+
+#[test]
+fn only_an_answer_that_cannot_change_settles_the_commands_post() {
+    let ok = PostResult {
+        ok: true,
+        status: Some(200),
+        skipped: None,
+    };
+    assert!(commands_settled(&ok));
+    assert!(commands_settled(&PostResult::failed(Some(422))));
+    assert!(commands_settled(&PostResult::skip(Skip::Empty)));
+    assert!(commands_settled(&PostResult::skip(Skip::Disabled)));
+
+    assert!(!commands_settled(&PostResult::failed(Some(503))));
+    assert!(!commands_settled(&PostResult::failed(Some(408))));
+    assert!(!commands_settled(&PostResult::failed(None)));
+    assert!(!commands_settled(&throttled()));
+    assert!(!commands_settled(&PostResult::skip(Skip::Suspended)));
+    assert!(!commands_settled(&PostResult::skip(Skip::Plan)));
+    assert!(!commands_settled(&PostResult::skip(Skip::FetchFailed)));
+}
+
 #[tokio::test]
 async fn dropping_the_last_handle_ends_the_background_tasks() {
     let server = MockServer::ok().await;
