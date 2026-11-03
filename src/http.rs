@@ -18,10 +18,12 @@ pub(crate) const USER_AGENT: &str = concat!(
     " (+https://github.com/TheDiscordList/integration-serenity)"
 );
 
-const TIMEOUT: Duration = Duration::from_secs(10);
-const DEFAULT_RETRY_AFTER: Duration = Duration::from_secs(60);
+pub(crate) const TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const DEFAULT_RETRY_AFTER: Duration = Duration::from_secs(60);
 /// A hostile or broken rate-limit header must not park the client forever.
-const MAX_SUSPENSION_SECS: u64 = 3600;
+pub(crate) const MAX_SUSPENSION_SECS: u64 = 3600;
+pub(crate) const RETRY_JITTER: Duration = Duration::from_secs(2);
+pub(crate) const BACKOFF_MAX_FACTOR: u32 = 30;
 
 #[derive(Debug)]
 pub(crate) enum Outcome {
@@ -179,13 +181,15 @@ fn retry_window(headers: &HeaderMap) -> Duration {
         wait = wait.max(Duration::from_secs(until_reset));
     }
 
-    wait + Duration::from_secs(2).mul_f64(random_unit())
+    wait + RETRY_JITTER.mul_f64(random_unit())
 }
 
 /// `min(base * 2^attempt, 30 * base)`, scaled by a random factor in `[0.5, 1.0]`.
 /// With the default 1 s base that is the spec's `min(1000 * 2^n, 30000)` ms.
 pub(crate) fn backoff(attempt: u32, base: Duration) -> Duration {
-    let ceiling = base.saturating_mul(1 << attempt.min(16)).min(base * 30);
+    let ceiling = base
+        .saturating_mul(1 << attempt.min(16))
+        .min(base * BACKOFF_MAX_FACTOR);
     ceiling.mul_f64(0.5 + random_unit() * 0.5)
 }
 

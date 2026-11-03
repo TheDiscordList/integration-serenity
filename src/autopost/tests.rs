@@ -946,6 +946,79 @@ async fn guild_changes_debounce_into_one_stats_post() {
     assert_eq!(server.posts().len(), 2);
 }
 
+/// Every SDK runs the same fixture, so a shared default cannot drift in one of them. The
+/// signature vectors are in `tests/webhooks.rs`: that feature builds without this module.
+#[test]
+fn defaults_match_the_shared_fixture() {
+    let fixture: Value =
+        serde_json::from_str(include_str!("../../tests/fixtures/sdk-conformance.json")).unwrap();
+    let seconds = |value: &Value| Duration::from_secs(value.as_u64().unwrap());
+    let defaults = &fixture["defaults"];
+    let config = Config::default();
+
+    assert_eq!(defaults["base_url"], DEFAULT_BASE_URL);
+    assert_eq!(seconds(&defaults["timeout_seconds"]), crate::http::TIMEOUT);
+    assert_eq!(
+        seconds(&defaults["forbidden_reprobe_seconds"]),
+        PLAN_REPROBE
+    );
+
+    let retry = &defaults["retry"];
+    assert_eq!(retry["attempts"], MAX_ATTEMPTS);
+    assert_eq!(seconds(&retry["backoff_base_seconds"]), config.retry_base);
+    assert_eq!(
+        seconds(&retry["backoff_max_seconds"]),
+        config.retry_base * crate::http::BACKOFF_MAX_FACTOR
+    );
+
+    let rate_limit = &defaults["rate_limit"];
+    assert_eq!(
+        seconds(&rate_limit["default_seconds"]),
+        crate::http::DEFAULT_RETRY_AFTER
+    );
+    assert_eq!(rate_limit["max_seconds"], crate::http::MAX_SUSPENSION_SECS);
+    assert_eq!(
+        seconds(&rate_limit["jitter_max_seconds"]),
+        crate::http::RETRY_JITTER
+    );
+
+    let stats = &defaults["stats"];
+    assert_eq!(
+        seconds(&stats["first_delay_seconds"]),
+        config.stats_first_delay
+    );
+    assert_eq!(seconds(&stats["interval_seconds"]), config.stats_interval);
+    assert_eq!(seconds(&stats["debounce_seconds"]), config.stats_debounce);
+    assert_eq!(seconds(&stats["min_gap_seconds"]), config.stats_min_gap);
+    assert_eq!(seconds(&stats["force_after_seconds"]), STATS_FORCE_AFTER);
+
+    let heartbeat = &defaults["heartbeat"];
+    assert_eq!(
+        seconds(&heartbeat["interval_seconds"]),
+        config.heartbeat_interval
+    );
+    assert_eq!(seconds(&heartbeat["jitter_max_seconds"]), HEARTBEAT_JITTER);
+
+    let commands = &defaults["commands"];
+    assert_eq!(
+        seconds(&commands["first_delay_seconds"]),
+        config.commands_delay
+    );
+    assert_eq!(seconds(&commands["retry_seconds"]), config.commands_retry);
+
+    // serenity has no terminal stage, so "disconnected" is the one state this crate never sends.
+    let states: Vec<Value> = [
+        ShardStatus::Ready,
+        ShardStatus::Connecting,
+        ShardStatus::Resuming,
+    ]
+    .iter()
+    .map(|status| serde_json::to_value(status).unwrap())
+    .chain([json!("disconnected")])
+    .collect();
+    assert_eq!(fixture["shard_states"], Value::Array(states));
+}
+
 #[test]
 fn connection_stages_map_to_api_statuses() {
     let cases = [
