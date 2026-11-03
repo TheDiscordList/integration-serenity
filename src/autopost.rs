@@ -878,8 +878,8 @@ impl Inner {
         };
 
         {
-            // Every stats post re-indexes the listing and fires a webhook, and
-            // the server does not dedupe, so an unchanged count is skipped here.
+            // The server ignores an unchanged count, no re-index and no webhook,
+            // so re-sending one would only burn the per-bot rate budget.
             let mut state = self.state();
             let now = Instant::now();
             let fresh = state

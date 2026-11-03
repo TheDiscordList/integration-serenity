@@ -295,8 +295,8 @@ the heartbeat's internal stats forward.
 - A scheduled post that gets a `429` retries once the window lifts, if that
   lands before its next run. A manual `post_*` returns `Skip::Throttled` at once,
   so awaiting it never holds a command handler for the length of the window.
-- **Unchanged counts are not re-sent** for 30 minutes: every stats POST
-  re-indexes the listing and fires a `bot.stats_reported` webhook.
+- **Unchanged counts are not re-sent** for 30 minutes: the server ignores them,
+  so a re-send would only burn the rate limit.
 - **Only global commands are published.** Guild-scoped commands are not part
   of a listing.
 - **A shard never reads `disconnected`.** serenity's `Disconnected` stage only
