@@ -890,6 +890,36 @@ async fn a_terminal_client_error_ends_the_command_retries() {
     }
 }
 
+#[tokio::test]
+async fn a_manual_post_that_lands_ends_the_command_retries() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&calls);
+    let server = MockServer::start(move |request| {
+        if request.method == "GET" {
+            Reply::new(200, COMMANDS_JSON)
+        } else if counter.fetch_add(1, Ordering::SeqCst) < 3 {
+            Reply::new(503, "{}")
+        } else {
+            Reply::new(200, "{}")
+        }
+    })
+    .await;
+    let mut builder = builder(&server, &Events::default())
+        .stats(false)
+        .heartbeat(false);
+    builder.config.commands_delay = Duration::ZERO;
+    builder.config.commands_retry = Duration::from_millis(500);
+    let poster = builder.build();
+
+    poster.inner.on_ready(handles(&server), APP_ID, 0, 1);
+    // All three attempts fail, which leaves the 500 ms retry pending.
+    server.wait_for_posts(3, Duration::from_secs(5)).await;
+
+    assert!(poster.post_commands().await.ok);
+    sleep(Duration::from_millis(800)).await;
+    assert_eq!(server.posts().len(), 4);
+}
+
 #[test]
 fn only_an_answer_that_cannot_change_settles_the_commands_post() {
     let ok = PostResult {

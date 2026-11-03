@@ -557,6 +557,7 @@ struct State {
     last_beat_at: Option<Instant>,
     heartbeat_interval: Duration,
     warned: HashSet<&'static str>,
+    commands_landed: bool,
 }
 
 impl State {
@@ -573,6 +574,7 @@ impl State {
             last_beat_at: None,
             heartbeat_interval,
             warned: HashSet::new(),
+            commands_landed: false,
         }
     }
 }
@@ -1085,15 +1087,18 @@ impl Inner {
         let body = CommandsBody {
             commands: commands.iter().map(CommandPayload::from).collect(),
         };
-        self.send(
-            Publisher::Commands,
-            &format!("/bots/{bot_id}/commands"),
-            &body,
-            manual,
-            Some(self.config.commands_retry),
-        )
-        .await
-        .0
+        let result = self
+            .send(
+                Publisher::Commands,
+                &format!("/bots/{bot_id}/commands"),
+                &body,
+                manual,
+                Some(self.config.commands_retry),
+            )
+            .await
+            .0;
+        self.state().commands_landed |= result.ok;
+        result
     }
 
     /// One request, retrying transient failures and, once its window lifts, a 429,
@@ -1288,6 +1293,10 @@ async fn commands_loop(inner: Weak<Inner>) {
     loop {
         sleep(delay).await;
         let Some(inner) = inner.upgrade() else { return };
+        // A manual post that landed during the wait leaves only the same list to post again.
+        if inner.state().commands_landed {
+            return;
+        }
         if commands_settled(&inner.publish_commands(false).await) {
             return;
         }

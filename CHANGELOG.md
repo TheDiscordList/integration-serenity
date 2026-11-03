@@ -20,6 +20,8 @@ All notable changes to this crate are documented here. It follows
 - The commands post comes back 5 minutes after a server error, a rate limit, a
   plan suspension or a failed fetch from Discord, until it lands or a terminal
   `4xx` ends it.
+- A `post_commands` that lands ends a pending retry, which would only post the
+  same list again.
 - A scheduled post that gets a `429` retries once the window lifts, if that lands
   before its next run. A manual post still returns `Skip::Throttled` at once.
 - A heartbeat `429` no longer suspends stats and commands.
