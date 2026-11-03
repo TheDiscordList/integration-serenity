@@ -243,6 +243,31 @@ async fn an_unknown_cluster_count_sends_no_heartbeat() {
     );
 }
 
+#[test]
+fn a_restarting_shard_stays_in_the_report_and_the_cluster_count_stays_known() {
+    let runner = |id| LocalShard {
+        id,
+        status: ShardStatus::Ready,
+        latency: None,
+    };
+    let mut seen = BTreeMap::new();
+    with_restarting_shards(&mut seen, vec![runner(0), runner(1)]);
+
+    let shards = with_restarting_shards(&mut seen, vec![runner(1)]);
+
+    assert_eq!(
+        shards
+            .iter()
+            .map(|shard| (shard.id, shard.status))
+            .collect::<Vec<_>>(),
+        [(0, ShardStatus::Connecting), (1, ShardStatus::Ready)]
+    );
+    let poster = Autoposter::new("token");
+    assert_eq!(poster.inner.cluster(Some(2), &shards), Some((0, 1)));
+
+    assert!(with_restarting_shards(&mut seen, Vec::new()).is_empty());
+}
+
 #[tokio::test]
 async fn unauthorized_disables_every_publisher() {
     let server = MockServer::start(|_| Reply::new(401, r#"{"message":"Unauthenticated."}"#)).await;

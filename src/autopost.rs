@@ -761,7 +761,7 @@ impl Inner {
     async fn local_shards(&self) -> Vec<LocalShard> {
         if let Some(shard_manager) = self.shard_manager.get() {
             let runners = shard_manager.runners.lock().await;
-            let mut shards: Vec<LocalShard> = runners
+            let shards: Vec<LocalShard> = runners
                 .iter()
                 .map(|(id, runner)| LocalShard {
                     id: id.0,
@@ -769,8 +769,7 @@ impl Inner {
                     latency: runner.latency,
                 })
                 .collect();
-            shards.sort_by_key(|shard| shard.id);
-            return shards;
+            return with_restarting_shards(&mut self.state().shards, shards);
         }
         self.state()
             .shards
@@ -1260,6 +1259,31 @@ async fn commands_once(inner: Weak<Inner>) {
     if let Some(inner) = inner.upgrade() {
         inner.publish_commands(false).await;
     }
+}
+
+/// serenity's restart drops a shard's runner until the queuer's next boot slot, so a shard seen
+/// before and missing now is coming back. Leaving it out would look like a process that never
+/// held it, which disables heartbeats for good. No runners at all is a stopped manager.
+fn with_restarting_shards(
+    seen: &mut BTreeMap<u32, ShardStatus>,
+    mut runners: Vec<LocalShard>,
+) -> Vec<LocalShard> {
+    if runners.is_empty() {
+        return runners;
+    }
+    let running: HashSet<u32> = runners.iter().map(|shard| shard.id).collect();
+    runners.extend(
+        seen.keys()
+            .filter(|id| !running.contains(id))
+            .map(|&id| LocalShard {
+                id,
+                status: ShardStatus::Connecting,
+                latency: None,
+            }),
+    );
+    seen.extend(running.into_iter().map(|id| (id, ShardStatus::Connecting)));
+    runners.sort_by_key(|shard| shard.id);
+    runners
 }
 
 fn guilds_per_shard(cache: &Cache, total_shards: u32) -> HashMap<u32, u64> {
