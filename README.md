@@ -334,10 +334,10 @@ Every release after that:
 
 1. Bump `version` in `Cargo.toml` and move the `Unreleased` notes in
    `CHANGELOG.md` under it.
-2. Commit, tag `vX.Y.Z` and push the tag. `release.yml` checks the tag matches
-   `Cargo.toml`, runs the tests, exchanges the workflow's OIDC token for a
-   short-lived crates.io token with `rust-lang/crates-io-auth-action` and runs
-   `cargo publish`.
+2. Merge that to `main`, tag `vX.Y.Z` and push the tag. `release.yml` checks the
+   tag is on `main` and matches `Cargo.toml`, runs the tests, exchanges the
+   workflow's OIDC token for a short-lived crates.io token with
+   `rust-lang/crates-io-auth-action` and runs `cargo publish`.
 
 ## License
 
