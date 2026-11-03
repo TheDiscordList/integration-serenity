@@ -7,7 +7,7 @@ automatically, and verify its inbound webhooks.
 
 Adds nothing to a serenity bot's dependency tree: it reuses serenity's
 `reqwest`, TLS stack and tokio runtime. The optional `webhooks` feature adds
-`hmac` and `sha2`.
+`hmac`, `sha2` and `subtle`.
 
 ```sh
 cargo add thediscordlist-serenity
