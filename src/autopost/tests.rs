@@ -114,16 +114,15 @@ async fn stats_request_carries_headers_and_body() {
 async fn a_bearer_prefix_on_the_token_is_not_doubled() {
     let server = MockServer::ok().await;
     let poster = Autoposter::builder(" Bearer abc ")
-        .base_url(&server.url)
+        .base_url(format!("{}/", server.url))
         .build();
     ready(&poster, &server, 0, 1);
 
     poster.post_stats().await;
 
-    assert_eq!(
-        server.posts()[0].header("authorization"),
-        Some("Bearer abc")
-    );
+    let post = &server.posts()[0];
+    assert_eq!(post.header("authorization"), Some("Bearer abc"));
+    assert_eq!(post.path, format!("/bots/{APP_ID}/stats"));
 }
 
 #[tokio::test]
@@ -377,13 +376,19 @@ async fn not_found_disables_only_that_publisher() {
     assert!(poster.inner.is_disabled(Publisher::Stats));
     assert!(!poster.inner.is_disabled(Publisher::Heartbeat));
     assert!(poster.post_heartbeat().await.ok);
+    let event = taken(&events).remove(0);
     assert_eq!(
-        taken(&events)[0],
+        event,
         Event::Disabled {
             publisher: Publisher::Stats,
             status: Some(404),
             reason: "not-found"
         }
+    );
+    let message = event.to_string();
+    assert!(
+        message.contains("server listing") && !message.contains("token"),
+        "{message}"
     );
 }
 

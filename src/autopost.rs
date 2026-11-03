@@ -146,7 +146,7 @@ pub enum Skip {
     NoToken,
     /// The publisher is turned off in the builder, or disabled itself and this was not a manual post.
     Disabled,
-    /// No `READY` yet: the bot id, cache or HTTP client is not known.
+    /// No `READY` yet: the bot id, shard count, cache or HTTP client is not known.
     NotReady,
     /// The same publisher already has a request in flight.
     InFlight,
@@ -264,7 +264,6 @@ impl AutoposterBuilder {
     }
 
     /// Discord application id. Default: the one in the `READY` payload.
-    /// Setting it also lets [`Autoposter::post_stats`] work before `READY`.
     pub fn bot_id(mut self, bot_id: impl Into<u64>) -> Self {
         self.config.bot_id = Some(bot_id.into());
         self
@@ -553,7 +552,7 @@ struct State {
     handles: Option<Handles>,
     ready_at: Option<Instant>,
     last_stats_at: Option<Instant>,
-    last_stats: Option<(u64, Option<u32>)>,
+    last_stats: Option<(u64, u32)>,
     last_beat_at: Option<Instant>,
     heartbeat_interval: Duration,
     warned: HashSet<&'static str>,
@@ -869,6 +868,10 @@ impl Inner {
 
         let local = self.local_shards().await;
         let total_shards = self.state().total_shards;
+        // The server stores an absent shard_count as null, so nothing goes out before READY names it.
+        let Some(shard_count) = total_shards else {
+            return PostResult::skip(Skip::NotReady);
+        };
         let server_count = match self.measure(&local, total_shards).await {
             Ok(count) => count,
             Err(skip) => return PostResult::skip(skip),
@@ -882,7 +885,7 @@ impl Inner {
             let fresh = state
                 .last_stats_at
                 .is_some_and(|at| now < at + STATS_FORCE_AFTER);
-            if fresh && state.last_stats == Some((server_count, total_shards)) {
+            if fresh && state.last_stats == Some((server_count, shard_count)) {
                 return PostResult::skip(Skip::Unchanged);
             }
             state.last_stats_at = Some(now);
@@ -890,7 +893,7 @@ impl Inner {
 
         let body = StatsBody {
             server_count,
-            shard_count: total_shards,
+            shard_count,
         };
         let (result, _) = self
             .send(
@@ -902,7 +905,7 @@ impl Inner {
             )
             .await;
         if result.ok {
-            self.state().last_stats = Some((server_count, total_shards));
+            self.state().last_stats = Some((server_count, shard_count));
         }
         result
     }
@@ -1337,8 +1340,7 @@ fn guilds_per_shard(cache: &Cache, total_shards: u32) -> HashMap<u32, u64> {
 #[derive(Serialize)]
 struct StatsBody {
     server_count: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    shard_count: Option<u32>,
+    shard_count: u32,
 }
 
 #[derive(Serialize)]
