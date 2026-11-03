@@ -513,15 +513,16 @@ enum ShardStatus {
     Ready,
     Connecting,
     Resuming,
-    Disconnected,
 }
 
 impl From<ConnectionStage> for ShardStatus {
+    /// serenity has no terminal stage: `Disconnected` is a runner that has not started or is
+    /// about to restart, so `"disconnected"` is never sent. A stopped manager drops its
+    /// runners, and the heartbeat's silence says the rest.
     fn from(stage: ConnectionStage) -> Self {
         match stage {
             ConnectionStage::Connected => Self::Ready,
             ConnectionStage::Resuming => Self::Resuming,
-            ConnectionStage::Disconnected => Self::Disconnected,
             _ => Self::Connecting,
         }
     }

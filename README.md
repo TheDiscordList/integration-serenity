@@ -297,6 +297,10 @@ the heartbeat's internal stats forward.
   re-indexes the listing and fires a `bot.stats_reported` webhook.
 - **Only global commands are published.** Guild-scoped commands are not part
   of a listing.
+- **A shard never reads `disconnected`.** serenity's `Disconnected` stage only
+  means a runner that has not started or is about to restart, so it reads
+  `connecting`. A stopped shard manager drops its runners, the heartbeats stop,
+  and the server's silence check takes it from there.
 - The server count includes unavailable guilds: the bot is still in them.
   Without `GatewayIntents::GUILDS`, serenity's cache freezes at the `READY`
   snapshot and the count silently stops moving.

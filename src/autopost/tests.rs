@@ -724,7 +724,7 @@ fn connection_stages_map_to_api_statuses() {
         (ConnectionStage::Handshake, "connecting"),
         (ConnectionStage::Identifying, "connecting"),
         (ConnectionStage::Resuming, "resuming"),
-        (ConnectionStage::Disconnected, "disconnected"),
+        (ConnectionStage::Disconnected, "connecting"),
     ];
     for (stage, status) in cases {
         assert_eq!(
