@@ -186,6 +186,25 @@ async fn out_of_band_beats_keep_ten_seconds_from_the_last_beat() {
 }
 
 #[tokio::test]
+async fn a_burst_of_stage_changes_cannot_postpone_the_beat() {
+    let server = MockServer::ok().await;
+    let poster = builder(&server, &Events::default())
+        .stats(false)
+        .commands(false)
+        .build();
+    poster.inner.on_ready(handles(&server), APP_ID, 0, 1);
+    server.wait_for_posts(1, Duration::from_secs(5)).await;
+    poster.inner.state().last_beat_at = Instant::now().checked_sub(Duration::from_secs(20));
+
+    for _ in 0..8 {
+        poster.inner.on_stage(0, ConnectionStage::Connected);
+        sleep(Duration::from_millis(250)).await;
+    }
+
+    assert_eq!(server.posts().len(), 2);
+}
+
+#[tokio::test]
 async fn a_cluster_override_is_reported_verbatim() {
     let server = MockServer::ok().await;
     let poster = builder(&server, &Events::default()).cluster(2, 4).build();

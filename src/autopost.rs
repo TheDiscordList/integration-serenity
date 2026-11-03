@@ -1258,9 +1258,11 @@ async fn heartbeat_loop(inner: Weak<Inner>, wake: Arc<Notify>) {
                 next = inner.heartbeat_tick().await;
             }
             () = wake.notified() => {
-                // Shard transitions beat out of band; a burst coalesces into one.
+                // Shard transitions beat out of band; a burst coalesces into one. It must not
+                // re-arm: a mass reconnect would postpone every beat past the server's grace window.
                 let Some(inner) = inner.upgrade() else { return };
-                next = inner.out_of_band_beat();
+                let out_of_band = inner.out_of_band_beat();
+                next = next.zip(out_of_band).map_or(out_of_band, |(due, at)| Some(due.min(at)));
             }
         }
     }
