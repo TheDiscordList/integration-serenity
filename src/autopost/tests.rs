@@ -111,6 +111,18 @@ async fn stats_request_carries_headers_and_body() {
 }
 
 #[tokio::test]
+async fn a_panicking_event_callback_is_contained() {
+    let server = MockServer::ok().await;
+    let poster = Autoposter::builder("tdl_test_token")
+        .base_url(&server.url)
+        .on_event(|_| panic!("boom"))
+        .build();
+    ready(&poster, &server, 0, 1);
+
+    assert!(poster.post_stats().await.ok);
+}
+
+#[tokio::test]
 async fn a_bearer_prefix_on_the_token_is_not_doubled() {
     let server = MockServer::ok().await;
     let poster = Autoposter::builder(" Bearer abc ")

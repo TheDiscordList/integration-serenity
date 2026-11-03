@@ -6,6 +6,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::future::Future;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
@@ -610,7 +611,12 @@ impl Inner {
 
     fn emit(&self, event: Event) {
         match &self.on_event {
-            Some(on_event) => on_event(&event),
+            // A panic would end the publisher's task for good, and a silent heartbeat reads as down.
+            Some(on_event) => {
+                if catch_unwind(AssertUnwindSafe(|| on_event(&event))).is_err() {
+                    tracing::warn!("The on_event callback panicked on: {event}");
+                }
+            }
             None if matches!(event, Event::Posted { .. }) => tracing::debug!("{event}"),
             None => tracing::warn!("{event}"),
         }

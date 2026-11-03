@@ -179,8 +179,9 @@ poster.stop();
 Nothing in this crate panics or returns an `Err` at your bot. Background tasks
 handle their own failures, and `post_*` always resolves to a `PostResult`
 whose `skipped` says why nothing was sent (`MinGap`, `Unchanged`,
-`Suspended`, `NotReady`, …). Without `on_event`, events go to `tracing`:
-`debug` for posts, `warn` for errors and disabled publishers.
+`Suspended`, `NotReady`, …). A panicking `on_event` callback is logged and
+contained. Without `on_event`, events go to `tracing`: `debug` for posts, `warn`
+for errors and disabled publishers.
 
 An explicit `post_*` also re-arms a publisher that disabled itself, so you can
 retry after fixing a token or a listing id without restarting.
