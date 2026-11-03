@@ -127,7 +127,7 @@ async fn a_bearer_prefix_on_the_token_is_not_doubled() {
 }
 
 #[tokio::test]
-async fn heartbeat_reports_every_local_shard_and_omits_unknown_latency() {
+async fn heartbeat_reports_every_local_shard_and_omits_what_is_unknown() {
     let server = MockServer::ok().await;
     let poster = builder(&server, &Events::default()).build();
     ready(&poster, &server, 0, 2);
@@ -144,7 +144,7 @@ async fn heartbeat_reports_every_local_shard_and_omits_unknown_latency() {
             "cluster_count": 1,
             "shards": [
                 {"id": 0, "status": "ready", "guilds": 0},
-                {"id": 1, "status": "connecting", "guilds": 0}
+                {"id": 1, "status": "connecting"}
             ]
         })
     );

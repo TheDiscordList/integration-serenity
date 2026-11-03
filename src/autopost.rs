@@ -960,8 +960,10 @@ impl Inner {
                         u64::try_from(latency.as_millis())
                             .map_or(MAX_LATENCY_MS, |ms| ms.min(MAX_LATENCY_MS))
                     }),
+                    // A booting shard's 0 would zero the public count.
                     guilds: handles
                         .as_ref()
+                        .filter(|_| shard.status == ShardStatus::Ready)
                         .map(|_| guilds.get(&shard.id).copied().unwrap_or(0)),
                 })
                 .collect(),
