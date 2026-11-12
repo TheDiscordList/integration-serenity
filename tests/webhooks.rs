@@ -1,6 +1,7 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use hmac::{Hmac, Mac};
+use serde_json::Value;
 use sha2::Sha256;
 use thediscordlist_serenity::webhooks::{
     verify, verify_at, EventData, ListingKind, WebhookError, DEFAULT_TOLERANCE,
@@ -243,6 +244,30 @@ fn bump_ready_is_typed() {
     };
 
     assert_eq!(ready.ready_at, "2026-01-01T00:00:00+00:00");
+}
+
+/// The fixture signs bodies that are not full envelopes. This crate's `WebhookEvent` requires
+/// every envelope field, so a good signature on one reads `MalformedBody`: past the HMAC.
+#[test]
+fn the_shared_conformance_vectors_verify_as_expected() {
+    let fixture: Value =
+        serde_json::from_str(include_str!("fixtures/sdk-conformance.json")).unwrap();
+    let signature = &fixture["webhook_signature"];
+    let secret = signature["secret"].as_str().unwrap();
+    assert_eq!(signature["tolerance_seconds"], DEFAULT_TOLERANCE.as_secs());
+
+    for vector in signature["vectors"].as_array().unwrap() {
+        let result = verify_at(
+            vector["body"].as_str().unwrap().as_bytes(),
+            vector["header"].as_str(),
+            secret,
+            DEFAULT_TOLERANCE,
+            at(vector["now"].as_u64().unwrap()),
+        );
+
+        let verified = !matches!(result, Err(error) if error != WebhookError::MalformedBody);
+        assert_eq!(verified, vector["valid"], "{}", vector["name"]);
+    }
 }
 
 #[test]

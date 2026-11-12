@@ -6,6 +6,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::future::Future;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
@@ -43,6 +44,8 @@ const HEARTBEAT_OUT_OF_BAND_GAP: Duration = Duration::from_secs(10);
 
 /// Offset from the first stats post: the two share one server-side rate budget.
 const COMMANDS_DELAY: Duration = Duration::from_secs(10);
+/// How long after a failure that may pass the post is tried again.
+const COMMANDS_RETRY: Duration = Duration::from_secs(300);
 /// The Gold tier is derived per request, so a bot can gain it mid-run.
 const PLAN_REPROBE: Duration = Duration::from_secs(1800);
 /// serenity's shard queuer boots one shard per 5 s.
@@ -144,7 +147,7 @@ pub enum Skip {
     NoToken,
     /// The publisher is turned off in the builder, or disabled itself and this was not a manual post.
     Disabled,
-    /// No `READY` yet: the bot id, cache or HTTP client is not known.
+    /// No `READY` yet: the bot id, shard count, cache or HTTP client is not known.
     NotReady,
     /// The same publisher already has a request in flight.
     InFlight,
@@ -219,6 +222,7 @@ struct Config {
     cluster: Option<(u32, u32)>,
     stats_first_delay: Duration,
     commands_delay: Duration,
+    commands_retry: Duration,
     retry_base: Duration,
 }
 
@@ -238,6 +242,7 @@ impl Default for Config {
             cluster: None,
             stats_first_delay: STATS_FIRST_DELAY,
             commands_delay: COMMANDS_DELAY,
+            commands_retry: COMMANDS_RETRY,
             retry_base: Duration::from_secs(1),
         }
     }
@@ -260,7 +265,6 @@ impl AutoposterBuilder {
     }
 
     /// Discord application id. Default: the one in the `READY` payload.
-    /// Setting it also lets [`Autoposter::post_stats`] work before `READY`.
     pub fn bot_id(mut self, bot_id: impl Into<u64>) -> Self {
         self.config.bot_id = Some(bot_id.into());
         self
@@ -513,15 +517,16 @@ enum ShardStatus {
     Ready,
     Connecting,
     Resuming,
-    Disconnected,
 }
 
 impl From<ConnectionStage> for ShardStatus {
+    /// serenity has no terminal stage: `Disconnected` is a runner that has not started or is
+    /// about to restart, so `"disconnected"` is never sent. A stopped manager drops its
+    /// runners, and the heartbeat's silence says the rest.
     fn from(stage: ConnectionStage) -> Self {
         match stage {
             ConnectionStage::Connected => Self::Ready,
             ConnectionStage::Resuming => Self::Resuming,
-            ConnectionStage::Disconnected => Self::Disconnected,
             _ => Self::Connecting,
         }
     }
@@ -548,10 +553,11 @@ struct State {
     handles: Option<Handles>,
     ready_at: Option<Instant>,
     last_stats_at: Option<Instant>,
-    last_stats: Option<(u64, Option<u32>)>,
+    last_stats: Option<(u64, u32)>,
     last_beat_at: Option<Instant>,
     heartbeat_interval: Duration,
     warned: HashSet<&'static str>,
+    commands_landed: bool,
 }
 
 impl State {
@@ -568,6 +574,7 @@ impl State {
             last_beat_at: None,
             heartbeat_interval,
             warned: HashSet::new(),
+            commands_landed: false,
         }
     }
 }
@@ -606,7 +613,12 @@ impl Inner {
 
     fn emit(&self, event: Event) {
         match &self.on_event {
-            Some(on_event) => on_event(&event),
+            // A panic would end the publisher's task for good, and a silent heartbeat reads as down.
+            Some(on_event) => {
+                if catch_unwind(AssertUnwindSafe(|| on_event(&event))).is_err() {
+                    tracing::warn!("The on_event callback panicked on: {event}");
+                }
+            }
             None if matches!(event, Event::Posted { .. }) => tracing::debug!("{event}"),
             None => tracing::warn!("{event}"),
         }
@@ -678,7 +690,7 @@ impl Inner {
             )));
         }
         if self.config.commands {
-            tasks.push(tokio::spawn(commands_once(Arc::downgrade(self))));
+            tasks.push(tokio::spawn(commands_loop(Arc::downgrade(self))));
         }
     }
 
@@ -760,7 +772,7 @@ impl Inner {
     async fn local_shards(&self) -> Vec<LocalShard> {
         if let Some(shard_manager) = self.shard_manager.get() {
             let runners = shard_manager.runners.lock().await;
-            let mut shards: Vec<LocalShard> = runners
+            let shards: Vec<LocalShard> = runners
                 .iter()
                 .map(|(id, runner)| LocalShard {
                     id: id.0,
@@ -768,8 +780,7 @@ impl Inner {
                     latency: runner.latency,
                 })
                 .collect();
-            shards.sort_by_key(|shard| shard.id);
-            return shards;
+            return with_restarting_shards(&mut self.state().shards, shards);
         }
         self.state()
             .shards
@@ -829,6 +840,10 @@ impl Inner {
             }
             return Err(Skip::Unmeasurable);
         }
+        // The cache only holds a shard's guilds from its READY on, so a boot would undercount.
+        if local.iter().any(|shard| shard.status != ShardStatus::Ready) {
+            return Err(Skip::Unmeasurable);
+        }
         let cache = self
             .state()
             .handles
@@ -861,20 +876,24 @@ impl Inner {
 
         let local = self.local_shards().await;
         let total_shards = self.state().total_shards;
+        // The server stores an absent shard_count as null, so nothing goes out before READY names it.
+        let Some(shard_count) = total_shards else {
+            return PostResult::skip(Skip::NotReady);
+        };
         let server_count = match self.measure(&local, total_shards).await {
             Ok(count) => count,
             Err(skip) => return PostResult::skip(skip),
         };
 
         {
-            // Every stats post re-indexes the listing and fires a webhook, and
-            // the server does not dedupe, so an unchanged count is skipped here.
+            // The server ignores an unchanged count, no re-index and no webhook,
+            // so re-sending one would only burn the per-bot rate budget.
             let mut state = self.state();
             let now = Instant::now();
             let fresh = state
                 .last_stats_at
                 .is_some_and(|at| now < at + STATS_FORCE_AFTER);
-            if fresh && state.last_stats == Some((server_count, total_shards)) {
+            if fresh && state.last_stats == Some((server_count, shard_count)) {
                 return PostResult::skip(Skip::Unchanged);
             }
             state.last_stats_at = Some(now);
@@ -882,18 +901,19 @@ impl Inner {
 
         let body = StatsBody {
             server_count,
-            shard_count: total_shards,
+            shard_count,
         };
         let (result, _) = self
             .send(
                 Publisher::Stats,
                 &format!("/bots/{bot_id}/stats"),
                 &body,
+                manual,
                 Some(self.config.stats_interval),
             )
             .await;
         if result.ok {
-            self.state().last_stats = Some((server_count, total_shards));
+            self.state().last_stats = Some((server_count, shard_count));
         }
         result
     }
@@ -959,8 +979,10 @@ impl Inner {
                         u64::try_from(latency.as_millis())
                             .map_or(MAX_LATENCY_MS, |ms| ms.min(MAX_LATENCY_MS))
                     }),
+                    // A booting shard's 0 would zero the public count.
                     guilds: handles
                         .as_ref()
+                        .filter(|_| shard.status == ShardStatus::Ready)
                         .map(|_| guilds.get(&shard.id).copied().unwrap_or(0)),
                 })
                 .collect(),
@@ -976,6 +998,7 @@ impl Inner {
                 Publisher::Heartbeat,
                 &format!("/bots/{bot_id}/heartbeat"),
                 &body,
+                manual,
                 Some(interval),
             )
             .await;
@@ -1064,24 +1087,31 @@ impl Inner {
         let body = CommandsBody {
             commands: commands.iter().map(CommandPayload::from).collect(),
         };
-        self.send(
-            Publisher::Commands,
-            &format!("/bots/{bot_id}/commands"),
-            &body,
-            None,
-        )
-        .await
-        .0
+        let result = self
+            .send(
+                Publisher::Commands,
+                &format!("/bots/{bot_id}/commands"),
+                &body,
+                manual,
+                Some(self.config.commands_retry),
+            )
+            .await
+            .0;
+        self.state().commands_landed |= result.ok;
+        result
     }
 
-    /// One request, retrying only transient failures, at most three attempts.
-    /// A retry that would land past the next scheduled run is dropped: that
-    /// run carries fresher data, and a failed request still burns rate-limit budget.
+    /// One request, retrying transient failures and, once its window lifts, a 429,
+    /// at most three attempts. A retry that would land past the next scheduled run
+    /// is dropped: that run carries fresher data, and a failed request still burns
+    /// rate-limit budget. A manual post answers a 429 at once: its caller may be a
+    /// command handler, and a window can run for minutes.
     async fn send(
         &self,
         publisher: Publisher,
         path: &str,
         body: &(impl Serialize + Sync),
+        manual: bool,
         next_run_in: Option<Duration>,
     ) -> (PostResult, Option<Value>) {
         let Some(api) = &self.api else {
@@ -1094,12 +1124,17 @@ impl Inner {
                 .post(path, body, publisher == Publisher::Heartbeat)
                 .await;
             attempt += 1;
-            if attempt < MAX_ATTEMPTS && matches!(outcome, Outcome::Transient { .. }) {
-                let delay = backoff(attempt - 1, self.config.retry_base);
-                if !next_run.is_some_and(|at| Instant::now() + delay >= at) {
-                    sleep(delay).await;
-                    continue;
-                }
+            let retry = match outcome {
+                Outcome::Transient { .. } => Some(backoff(attempt - 1, self.config.retry_base)),
+                Outcome::Throttled { retry_after } if !manual => Some(retry_after),
+                _ => None,
+            }
+            .filter(|delay| {
+                attempt < MAX_ATTEMPTS && !next_run.is_some_and(|at| Instant::now() + *delay >= at)
+            });
+            if let Some(delay) = retry {
+                sleep(delay).await;
+                continue;
             }
             return self.react(publisher, outcome);
         }
@@ -1170,7 +1205,7 @@ impl Inner {
                 );
                 (PostResult::failed(Some(status)), None)
             }
-            Outcome::Throttled => (
+            Outcome::Throttled { .. } => (
                 PostResult {
                     ok: false,
                     status: Some(429),
@@ -1237,22 +1272,75 @@ async fn heartbeat_loop(inner: Weak<Inner>, wake: Arc<Notify>) {
                 next = inner.heartbeat_tick().await;
             }
             () = wake.notified() => {
-                // Shard transitions beat out of band; a burst coalesces into one.
+                // Shard transitions beat out of band; a burst coalesces into one. It must not
+                // re-arm: a mass reconnect would postpone every beat past the server's grace window.
                 let Some(inner) = inner.upgrade() else { return };
-                next = inner.out_of_band_beat();
+                let out_of_band = inner.out_of_band_beat();
+                next = next.zip(out_of_band).map_or(out_of_band, |(due, at)| Some(due.min(at)));
             }
         }
     }
 }
 
-async fn commands_once(inner: Weak<Inner>) {
-    let Some(delay) = inner.upgrade().map(|inner| inner.config.commands_delay) else {
+/// Once per process, until it lands: commands change on deploy, and a deploy is a restart.
+async fn commands_loop(inner: Weak<Inner>) {
+    let Some((mut delay, retry)) = inner
+        .upgrade()
+        .map(|inner| (inner.config.commands_delay, inner.config.commands_retry))
+    else {
         return;
     };
-    sleep(delay).await;
-    if let Some(inner) = inner.upgrade() {
-        inner.publish_commands(false).await;
+    loop {
+        sleep(delay).await;
+        let Some(inner) = inner.upgrade() else { return };
+        // A manual post that landed during the wait leaves only the same list to post again.
+        if inner.state().commands_landed {
+            return;
+        }
+        if commands_settled(&inner.publish_commands(false).await) {
+            return;
+        }
+        delay = retry;
     }
+}
+
+/// A success, or an answer that asking again cannot change.
+fn commands_settled(result: &PostResult) -> bool {
+    match result.skipped {
+        Some(Skip::Empty | Skip::NotElected | Skip::Disabled) => true,
+        Some(_) => false,
+        None => {
+            result.ok
+                || result.status.is_some_and(|status| {
+                    (400..500).contains(&status) && !matches!(status, 408 | 425)
+                })
+        }
+    }
+}
+
+/// serenity's restart drops a shard's runner until the queuer's next boot slot, so a shard seen
+/// before and missing now is coming back. Leaving it out would look like a process that never
+/// held it, which disables heartbeats for good. No runners at all is a stopped manager.
+fn with_restarting_shards(
+    seen: &mut BTreeMap<u32, ShardStatus>,
+    mut runners: Vec<LocalShard>,
+) -> Vec<LocalShard> {
+    if runners.is_empty() {
+        return runners;
+    }
+    let running: HashSet<u32> = runners.iter().map(|shard| shard.id).collect();
+    runners.extend(
+        seen.keys()
+            .filter(|id| !running.contains(id))
+            .map(|&id| LocalShard {
+                id,
+                status: ShardStatus::Connecting,
+                latency: None,
+            }),
+    );
+    seen.extend(running.into_iter().map(|id| (id, ShardStatus::Connecting)));
+    runners.sort_by_key(|shard| shard.id);
+    runners
 }
 
 fn guilds_per_shard(cache: &Cache, total_shards: u32) -> HashMap<u32, u64> {
@@ -1267,8 +1355,7 @@ fn guilds_per_shard(cache: &Cache, total_shards: u32) -> HashMap<u32, u64> {
 #[derive(Serialize)]
 struct StatsBody {
     server_count: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    shard_count: Option<u32>,
+    shard_count: u32,
 }
 
 #[derive(Serialize)]

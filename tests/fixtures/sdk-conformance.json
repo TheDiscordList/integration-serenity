@@ -1,0 +1,114 @@
+{
+  "webhook_signature": {
+    "secret": "tdl-conformance-secret",
+    "tolerance_seconds": 300,
+    "vectors": [
+      {
+        "name": "signed now",
+        "now": 1800000000,
+        "body": "{\"event\":\"listing.upvoted\",\"data\":{\"id\":\"754613273751584818\"}}",
+        "header": "t=1800000000,v1=019e578ced155e7d41c446a1a439c1e603d7ac7fe5f40b1eee5f12991ed0f296",
+        "valid": true
+      },
+      {
+        "name": "unescaped unicode and slashes",
+        "now": 1800000000,
+        "body": "{\"event\":\"listing.upvoted\",\"data\":{\"name\":\"Café ☕ 🎉\",\"url\":\"https://thediscordlist.com/servers/1\"}}",
+        "header": "t=1800000000,v1=e0244addf1b2fc0a5e3498172d6a9b5bbdfa3259a1ff322568a595e930170d8c",
+        "valid": true
+      },
+      {
+        "name": "oldest allowed",
+        "now": 1800000300,
+        "body": "{\"event\":\"listing.upvoted\",\"data\":{\"id\":\"754613273751584818\"}}",
+        "header": "t=1800000000,v1=019e578ced155e7d41c446a1a439c1e603d7ac7fe5f40b1eee5f12991ed0f296",
+        "valid": true
+      },
+      {
+        "name": "newest allowed",
+        "now": 1799999700,
+        "body": "{\"event\":\"listing.upvoted\",\"data\":{\"id\":\"754613273751584818\"}}",
+        "header": "t=1800000000,v1=019e578ced155e7d41c446a1a439c1e603d7ac7fe5f40b1eee5f12991ed0f296",
+        "valid": true
+      },
+      {
+        "name": "too old",
+        "now": 1800000301,
+        "body": "{\"event\":\"listing.upvoted\",\"data\":{\"id\":\"754613273751584818\"}}",
+        "header": "t=1800000000,v1=019e578ced155e7d41c446a1a439c1e603d7ac7fe5f40b1eee5f12991ed0f296",
+        "valid": false
+      },
+      {
+        "name": "from the future",
+        "now": 1799999699,
+        "body": "{\"event\":\"listing.upvoted\",\"data\":{\"id\":\"754613273751584818\"}}",
+        "header": "t=1800000000,v1=019e578ced155e7d41c446a1a439c1e603d7ac7fe5f40b1eee5f12991ed0f296",
+        "valid": false
+      },
+      {
+        "name": "tampered body",
+        "now": 1800000000,
+        "body": "{\"event\":\"listing.upvoted\",\"data\":{\"id\":\"754613273751584818\"}} ",
+        "header": "t=1800000000,v1=019e578ced155e7d41c446a1a439c1e603d7ac7fe5f40b1eee5f12991ed0f296",
+        "valid": false
+      },
+      {
+        "name": "other secret",
+        "now": 1800000000,
+        "body": "{\"event\":\"listing.upvoted\",\"data\":{\"id\":\"754613273751584818\"}}",
+        "header": "t=1800000000,v1=ea7356cb5b923bb9a36f6b79231fcc82d0142813925fa72556e165adaf3554cd",
+        "valid": false
+      },
+      {
+        "name": "no v1",
+        "now": 1800000000,
+        "body": "{\"event\":\"listing.upvoted\",\"data\":{\"id\":\"754613273751584818\"}}",
+        "header": "t=1800000000",
+        "valid": false
+      },
+      {
+        "name": "non-ascii v1",
+        "now": 1800000000,
+        "body": "{\"event\":\"listing.upvoted\",\"data\":{\"id\":\"754613273751584818\"}}",
+        "header": "t=1800000000,v1=éééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé",
+        "valid": false
+      }
+    ]
+  },
+  "defaults": {
+    "base_url": "https://thediscordlist.com/api",
+    "timeout_seconds": 10,
+    "retry": {
+      "attempts": 3,
+      "backoff_base_seconds": 1,
+      "backoff_max_seconds": 30
+    },
+    "rate_limit": {
+      "default_seconds": 60,
+      "max_seconds": 3600,
+      "jitter_max_seconds": 2
+    },
+    "forbidden_reprobe_seconds": 1800,
+    "stats": {
+      "first_delay_seconds": 5,
+      "interval_seconds": 300,
+      "debounce_seconds": 20,
+      "min_gap_seconds": 60,
+      "force_after_seconds": 1800
+    },
+    "heartbeat": {
+      "interval_seconds": 30,
+      "jitter_max_seconds": 5
+    },
+    "commands": {
+      "first_delay_seconds": 10,
+      "retry_seconds": 300
+    }
+  },
+  "shard_states": [
+    "ready",
+    "connecting",
+    "resuming",
+    "disconnected"
+  ]
+}

@@ -7,7 +7,7 @@ automatically, and verify its inbound webhooks.
 
 Adds nothing to a serenity bot's dependency tree: it reuses serenity's
 `reqwest`, TLS stack and tokio runtime. The optional `webhooks` feature adds
-`hmac` and `sha2`.
+`hmac`, `sha2` and `subtle`.
 
 ```sh
 cargo add thediscordlist-serenity
@@ -42,7 +42,7 @@ next to yours and starts on the first `READY`. It runs three publishers:
 | --- | --- | --- |
 | Stats | `server_count`, `shard_count` | 5 s after `READY`, then every 5 min, debounced 20 s on guild join/leave |
 | Heartbeat | per-shard status, latency and guild counts | right after `READY`, then every ~30 s, plus an extra beat on any shard stage change, at least 10 s after the last one |
-| Commands | your global application commands | once, ~10 s after `READY` |
+| Commands | your global application commands | once, ~10 s after `READY`; again every 5 min until it lands, after a server error, a rate limit or a failed fetch from Discord |
 
 `attach_shard_manager` is optional. With it, heartbeats read each shard's
 stage and latency from serenity's shard runners; without it they track stages
@@ -179,8 +179,9 @@ poster.stop();
 Nothing in this crate panics or returns an `Err` at your bot. Background tasks
 handle their own failures, and `post_*` always resolves to a `PostResult`
 whose `skipped` says why nothing was sent (`MinGap`, `Unchanged`,
-`Suspended`, `NotReady`, …). Without `on_event`, events go to `tracing`:
-`debug` for posts, `warn` for errors and disabled publishers.
+`Suspended`, `NotReady`, …). A panicking `on_event` callback is logged and
+contained. Without `on_event`, events go to `tracing`: `debug` for posts, `warn`
+for errors and disabled publishers.
 
 An explicit `post_*` also re-arms a publisher that disabled itself, so you can
 retry after fixing a token or a listing id without restarting.
@@ -281,22 +282,28 @@ the heartbeat's internal stats forward.
 - **Heartbeats need Gold or higher.** On a `403` the heartbeat publisher
   suspends and reprobes every 30 minutes rather than disabling: the tier is
   derived per request, so a bot can gain it mid-run.
-- **Rate limits are shared.** Stats and commands share 60 requests per minute
-  per bot; heartbeats have 120. This crate keeps one client-side `429`
-  suspension (`Retry-After`, `X-RateLimit-Reset`, plus jitter; 60 s without
-  either, never more than an hour) for stats and
-  commands, and heartbeats bypass it: a stale number beats a false "down" on
-  your status page.
+- **Stats and commands share a rate limit** of 60 requests per minute per bot.
+  A `429` on either suspends both (`Retry-After`, `X-RateLimit-Reset`, plus
+  jitter; 60 s without either, never more than an hour). Heartbeats have a
+  limiter of their own, so they neither start nor honour that suspension: a
+  stale number beats a false "down" on your status page.
 - **`404` never means "bad token".** It means the id is unknown or belongs to
   a server listing, and disables only that publisher. A `401` disables all
   three.
 - `408`, `425`, `5xx`, timeouts (10 s) and network errors retry up to three
   times with jittered exponential backoff, never past the next scheduled run.
   Any other `4xx` is reported once and not retried.
-- **Unchanged counts are not re-sent** for 30 minutes: every stats POST
-  re-indexes the listing and fires a `bot.stats_reported` webhook.
+- A scheduled post that gets a `429` retries once the window lifts, if that
+  lands before its next run. A manual `post_*` returns `Skip::Throttled` at once,
+  so awaiting it never holds a command handler for the length of the window.
+- **Unchanged counts are not re-sent** for 30 minutes: the server ignores them,
+  so a re-send would only burn the rate limit.
 - **Only global commands are published.** Guild-scoped commands are not part
   of a listing.
+- **A shard never reads `disconnected`.** serenity's `Disconnected` stage only
+  means a runner that has not started or is about to restart, so it reads
+  `connecting`. A stopped shard manager drops its runners, the heartbeats stop,
+  and the server's silence check takes it from there.
 - The server count includes unavailable guilds: the bot is still in them.
   Without `GatewayIntents::GUILDS`, serenity's cache freezes at the `READY`
   snapshot and the count silently stops moving.
@@ -328,10 +335,10 @@ Every release after that:
 
 1. Bump `version` in `Cargo.toml` and move the `Unreleased` notes in
    `CHANGELOG.md` under it.
-2. Commit, tag `vX.Y.Z` and push the tag. `release.yml` checks the tag matches
-   `Cargo.toml`, runs the tests, exchanges the workflow's OIDC token for a
-   short-lived crates.io token with `rust-lang/crates-io-auth-action` and runs
-   `cargo publish`.
+2. Merge that to `main`, tag `vX.Y.Z` and push the tag. `release.yml` checks the
+   tag is on `main` and matches `Cargo.toml`, runs the tests, exchanges the
+   workflow's OIDC token for a short-lived crates.io token with
+   `rust-lang/crates-io-auth-action` and runs `cargo publish`.
 
 ## License
 

@@ -111,23 +111,34 @@ async fn stats_request_carries_headers_and_body() {
 }
 
 #[tokio::test]
+async fn a_panicking_event_callback_is_contained() {
+    let server = MockServer::ok().await;
+    let poster = Autoposter::builder("tdl_test_token")
+        .base_url(&server.url)
+        .on_event(|_| panic!("boom"))
+        .build();
+    ready(&poster, &server, 0, 1);
+
+    assert!(poster.post_stats().await.ok);
+}
+
+#[tokio::test]
 async fn a_bearer_prefix_on_the_token_is_not_doubled() {
     let server = MockServer::ok().await;
     let poster = Autoposter::builder(" Bearer abc ")
-        .base_url(&server.url)
+        .base_url(format!("{}/", server.url))
         .build();
     ready(&poster, &server, 0, 1);
 
     poster.post_stats().await;
 
-    assert_eq!(
-        server.posts()[0].header("authorization"),
-        Some("Bearer abc")
-    );
+    let post = &server.posts()[0];
+    assert_eq!(post.header("authorization"), Some("Bearer abc"));
+    assert_eq!(post.path, format!("/bots/{APP_ID}/stats"));
 }
 
 #[tokio::test]
-async fn heartbeat_reports_every_local_shard_and_omits_unknown_latency() {
+async fn heartbeat_reports_every_local_shard_and_omits_what_is_unknown() {
     let server = MockServer::ok().await;
     let poster = builder(&server, &Events::default()).build();
     ready(&poster, &server, 0, 2);
@@ -144,7 +155,7 @@ async fn heartbeat_reports_every_local_shard_and_omits_unknown_latency() {
             "cluster_count": 1,
             "shards": [
                 {"id": 0, "status": "ready", "guilds": 0},
-                {"id": 1, "status": "connecting", "guilds": 0}
+                {"id": 1, "status": "connecting"}
             ]
         })
     );
@@ -183,6 +194,25 @@ async fn out_of_band_beats_keep_ten_seconds_from_the_last_beat() {
     poster.inner.state().last_beat_at = Instant::now().checked_sub(Duration::from_secs(20));
     let next = poster.inner.out_of_band_beat().unwrap();
     assert!(next <= Instant::now() + Duration::from_secs(1), "{next:?}");
+}
+
+#[tokio::test]
+async fn a_burst_of_stage_changes_cannot_postpone_the_beat() {
+    let server = MockServer::ok().await;
+    let poster = builder(&server, &Events::default())
+        .stats(false)
+        .commands(false)
+        .build();
+    poster.inner.on_ready(handles(&server), APP_ID, 0, 1);
+    server.wait_for_posts(1, Duration::from_secs(5)).await;
+    poster.inner.state().last_beat_at = Instant::now().checked_sub(Duration::from_secs(20));
+
+    for _ in 0..8 {
+        poster.inner.on_stage(0, ConnectionStage::Connected);
+        sleep(Duration::from_millis(250)).await;
+    }
+
+    assert_eq!(server.posts().len(), 2);
 }
 
 #[tokio::test]
@@ -241,6 +271,31 @@ async fn an_unknown_cluster_count_sends_no_heartbeat() {
             reason: "cluster-count-unknown"
         }]
     );
+}
+
+#[test]
+fn a_restarting_shard_stays_in_the_report_and_the_cluster_count_stays_known() {
+    let runner = |id| LocalShard {
+        id,
+        status: ShardStatus::Ready,
+        latency: None,
+    };
+    let mut seen = BTreeMap::new();
+    with_restarting_shards(&mut seen, vec![runner(0), runner(1)]);
+
+    let shards = with_restarting_shards(&mut seen, vec![runner(1)]);
+
+    assert_eq!(
+        shards
+            .iter()
+            .map(|shard| (shard.id, shard.status))
+            .collect::<Vec<_>>(),
+        [(0, ShardStatus::Connecting), (1, ShardStatus::Ready)]
+    );
+    let poster = Autoposter::new("token");
+    assert_eq!(poster.inner.cluster(Some(2), &shards), Some((0, 1)));
+
+    assert!(with_restarting_shards(&mut seen, Vec::new()).is_empty());
 }
 
 #[tokio::test]
@@ -333,13 +388,19 @@ async fn not_found_disables_only_that_publisher() {
     assert!(poster.inner.is_disabled(Publisher::Stats));
     assert!(!poster.inner.is_disabled(Publisher::Heartbeat));
     assert!(poster.post_heartbeat().await.ok);
+    let event = taken(&events).remove(0);
     assert_eq!(
-        taken(&events)[0],
+        event,
         Event::Disabled {
             publisher: Publisher::Stats,
             status: Some(404),
             reason: "not-found"
         }
+    );
+    let message = event.to_string();
+    assert!(
+        message.contains("server listing") && !message.contains("token"),
+        "{message}"
     );
 }
 
@@ -407,6 +468,61 @@ async fn throttling_suspends_stats_and_commands_but_not_heartbeats() {
             format!("/bots/{APP_ID}/heartbeat")
         ]
     );
+}
+
+#[tokio::test]
+async fn a_scheduled_post_retries_a_rate_limit_once_the_window_lifts() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&calls);
+    let server = MockServer::start(move |_| {
+        if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+            Reply::new(429, "{}").header("retry-after", "1")
+        } else {
+            Reply::new(200, "{}")
+        }
+    })
+    .await;
+    let poster = builder(&server, &Events::default()).build();
+    ready(&poster, &server, 0, 1);
+
+    assert!(poster.inner.publish_stats(false).await.ok);
+    assert_eq!(server.posts().len(), 2);
+}
+
+#[tokio::test]
+async fn a_rate_limit_past_the_next_run_is_left_to_that_run() {
+    let server = MockServer::start(|_| Reply::new(429, "{}").header("retry-after", "120")).await;
+    let poster = builder(&server, &Events::default()).build();
+    ready(&poster, &server, 0, 1);
+
+    let result = tokio::time::timeout(Duration::from_secs(5), poster.inner.beat(false))
+        .await
+        .expect("the retry waited past the next run");
+
+    assert_eq!(result, throttled());
+    assert_eq!(server.posts().len(), 1);
+}
+
+#[tokio::test]
+async fn a_throttled_heartbeat_leaves_stats_and_commands_alone() {
+    let server = MockServer::start(|request| {
+        if request.path.ends_with("/heartbeat") {
+            Reply::new(429, "{}").header("retry-after", "120")
+        } else if request.method == "GET" {
+            Reply::new(200, COMMANDS_JSON)
+        } else {
+            Reply::new(200, "{}")
+        }
+    })
+    .await;
+    let poster = builder(&server, &Events::default()).build();
+    ready(&poster, &server, 0, 1);
+
+    assert_eq!(poster.post_heartbeat().await, throttled());
+
+    assert_eq!(poster.inner.api.as_ref().unwrap().suspended_until(), None);
+    assert!(poster.post_stats().await.ok);
+    assert!(poster.post_commands().await.ok);
 }
 
 #[tokio::test]
@@ -608,6 +724,24 @@ async fn stats_respect_the_minimum_gap_and_skip_unchanged_counts() {
 }
 
 #[tokio::test]
+async fn stats_wait_for_every_local_shard_to_be_ready() {
+    let server = MockServer::ok().await;
+    let poster = builder(&server, &Events::default()).build();
+    ready(&poster, &server, 0, 2);
+    poster.inner.on_stage(1, ConnectionStage::Identifying);
+
+    assert_eq!(
+        poster.post_stats().await,
+        PostResult::skip(Skip::Unmeasurable)
+    );
+    assert!(server.posts().is_empty());
+
+    poster.inner.on_stage(1, ConnectionStage::Connected);
+
+    assert!(poster.post_stats().await.ok);
+}
+
+#[tokio::test]
 async fn only_cluster_zero_publishes_stats() {
     let server = MockServer::ok().await;
 
@@ -669,6 +803,144 @@ async fn ready_starts_all_three_publishers_and_stop_ends_them() {
     assert!(lock(&poster.inner.tasks).is_empty());
 }
 
+fn commands_only(server: &MockServer) -> Autoposter {
+    let mut builder = builder(server, &Events::default())
+        .stats(false)
+        .heartbeat(false);
+    builder.config.commands_delay = Duration::ZERO;
+    builder.config.commands_retry = Duration::from_millis(20);
+    builder.build()
+}
+
+#[tokio::test]
+async fn commands_come_back_after_a_server_error_until_they_land() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&calls);
+    let server = MockServer::start(move |request| {
+        if request.method == "GET" {
+            Reply::new(200, COMMANDS_JSON)
+        } else if counter.fetch_add(1, Ordering::SeqCst) < 3 {
+            Reply::new(503, "{}")
+        } else {
+            Reply::new(200, "{}")
+        }
+    })
+    .await;
+    let poster = commands_only(&server);
+
+    poster.inner.on_ready(handles(&server), APP_ID, 0, 1);
+
+    server.wait_for_posts(4, Duration::from_secs(5)).await;
+    sleep(Duration::from_millis(100)).await;
+    assert_eq!(server.posts().len(), 4);
+}
+
+#[tokio::test]
+async fn commands_come_back_after_a_failed_fetch_from_discord() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&calls);
+    let server = MockServer::start(move |request| {
+        if request.method != "GET" {
+            Reply::new(200, "{}")
+        } else if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+            Reply::new(500, "{}")
+        } else {
+            Reply::new(200, COMMANDS_JSON)
+        }
+    })
+    .await;
+    let poster = commands_only(&server);
+
+    poster.inner.on_ready(handles(&server), APP_ID, 0, 1);
+
+    server.wait_for_posts(1, Duration::from_secs(5)).await;
+}
+
+#[tokio::test]
+async fn commands_come_back_after_the_suspension_dropped_them() {
+    let server = MockServer::start(|request| match request.method.as_str() {
+        "GET" => Reply::new(200, COMMANDS_JSON),
+        _ => Reply::new(200, "{}"),
+    })
+    .await;
+    let poster = commands_only(&server);
+    *lock(poster.inner.api.as_ref().unwrap().suspended_until_mut()) =
+        Some(Instant::now() + Duration::from_millis(50));
+
+    poster.inner.on_ready(handles(&server), APP_ID, 0, 1);
+
+    server.wait_for_posts(1, Duration::from_secs(5)).await;
+}
+
+#[tokio::test]
+async fn a_terminal_client_error_ends_the_command_retries() {
+    for status in [422, 404, 401] {
+        let server = MockServer::start(move |request| match request.method.as_str() {
+            "GET" => Reply::new(200, COMMANDS_JSON),
+            _ => Reply::new(status, "{}"),
+        })
+        .await;
+        let poster = commands_only(&server);
+
+        poster.inner.on_ready(handles(&server), APP_ID, 0, 1);
+
+        server.wait_for_posts(1, Duration::from_secs(5)).await;
+        sleep(Duration::from_millis(100)).await;
+        assert_eq!(server.posts().len(), 1, "{status}");
+    }
+}
+
+#[tokio::test]
+async fn a_manual_post_that_lands_ends_the_command_retries() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&calls);
+    let server = MockServer::start(move |request| {
+        if request.method == "GET" {
+            Reply::new(200, COMMANDS_JSON)
+        } else if counter.fetch_add(1, Ordering::SeqCst) < 3 {
+            Reply::new(503, "{}")
+        } else {
+            Reply::new(200, "{}")
+        }
+    })
+    .await;
+    let mut builder = builder(&server, &Events::default())
+        .stats(false)
+        .heartbeat(false);
+    builder.config.commands_delay = Duration::ZERO;
+    builder.config.commands_retry = Duration::from_millis(500);
+    let poster = builder.build();
+
+    poster.inner.on_ready(handles(&server), APP_ID, 0, 1);
+    // All three attempts fail, which leaves the 500 ms retry pending.
+    server.wait_for_posts(3, Duration::from_secs(5)).await;
+
+    assert!(poster.post_commands().await.ok);
+    sleep(Duration::from_millis(800)).await;
+    assert_eq!(server.posts().len(), 4);
+}
+
+#[test]
+fn only_an_answer_that_cannot_change_settles_the_commands_post() {
+    let ok = PostResult {
+        ok: true,
+        status: Some(200),
+        skipped: None,
+    };
+    assert!(commands_settled(&ok));
+    assert!(commands_settled(&PostResult::failed(Some(422))));
+    assert!(commands_settled(&PostResult::skip(Skip::Empty)));
+    assert!(commands_settled(&PostResult::skip(Skip::Disabled)));
+
+    assert!(!commands_settled(&PostResult::failed(Some(503))));
+    assert!(!commands_settled(&PostResult::failed(Some(408))));
+    assert!(!commands_settled(&PostResult::failed(None)));
+    assert!(!commands_settled(&throttled()));
+    assert!(!commands_settled(&PostResult::skip(Skip::Suspended)));
+    assert!(!commands_settled(&PostResult::skip(Skip::Plan)));
+    assert!(!commands_settled(&PostResult::skip(Skip::FetchFailed)));
+}
+
 #[tokio::test]
 async fn dropping_the_last_handle_ends_the_background_tasks() {
     let server = MockServer::ok().await;
@@ -716,6 +988,79 @@ async fn guild_changes_debounce_into_one_stats_post() {
     assert_eq!(server.posts().len(), 2);
 }
 
+/// Every SDK runs the same fixture, so a shared default cannot drift in one of them. The
+/// signature vectors are in `tests/webhooks.rs`: that feature builds without this module.
+#[test]
+fn defaults_match_the_shared_fixture() {
+    let fixture: Value =
+        serde_json::from_str(include_str!("../../tests/fixtures/sdk-conformance.json")).unwrap();
+    let seconds = |value: &Value| Duration::from_secs(value.as_u64().unwrap());
+    let defaults = &fixture["defaults"];
+    let config = Config::default();
+
+    assert_eq!(defaults["base_url"], DEFAULT_BASE_URL);
+    assert_eq!(seconds(&defaults["timeout_seconds"]), crate::http::TIMEOUT);
+    assert_eq!(
+        seconds(&defaults["forbidden_reprobe_seconds"]),
+        PLAN_REPROBE
+    );
+
+    let retry = &defaults["retry"];
+    assert_eq!(retry["attempts"], MAX_ATTEMPTS);
+    assert_eq!(seconds(&retry["backoff_base_seconds"]), config.retry_base);
+    assert_eq!(
+        seconds(&retry["backoff_max_seconds"]),
+        config.retry_base * crate::http::BACKOFF_MAX_FACTOR
+    );
+
+    let rate_limit = &defaults["rate_limit"];
+    assert_eq!(
+        seconds(&rate_limit["default_seconds"]),
+        crate::http::DEFAULT_RETRY_AFTER
+    );
+    assert_eq!(rate_limit["max_seconds"], crate::http::MAX_SUSPENSION_SECS);
+    assert_eq!(
+        seconds(&rate_limit["jitter_max_seconds"]),
+        crate::http::RETRY_JITTER
+    );
+
+    let stats = &defaults["stats"];
+    assert_eq!(
+        seconds(&stats["first_delay_seconds"]),
+        config.stats_first_delay
+    );
+    assert_eq!(seconds(&stats["interval_seconds"]), config.stats_interval);
+    assert_eq!(seconds(&stats["debounce_seconds"]), config.stats_debounce);
+    assert_eq!(seconds(&stats["min_gap_seconds"]), config.stats_min_gap);
+    assert_eq!(seconds(&stats["force_after_seconds"]), STATS_FORCE_AFTER);
+
+    let heartbeat = &defaults["heartbeat"];
+    assert_eq!(
+        seconds(&heartbeat["interval_seconds"]),
+        config.heartbeat_interval
+    );
+    assert_eq!(seconds(&heartbeat["jitter_max_seconds"]), HEARTBEAT_JITTER);
+
+    let commands = &defaults["commands"];
+    assert_eq!(
+        seconds(&commands["first_delay_seconds"]),
+        config.commands_delay
+    );
+    assert_eq!(seconds(&commands["retry_seconds"]), config.commands_retry);
+
+    // serenity has no terminal stage, so "disconnected" is the one state this crate never sends.
+    let states: Vec<Value> = [
+        ShardStatus::Ready,
+        ShardStatus::Connecting,
+        ShardStatus::Resuming,
+    ]
+    .iter()
+    .map(|status| serde_json::to_value(status).unwrap())
+    .chain([json!("disconnected")])
+    .collect();
+    assert_eq!(fixture["shard_states"], Value::Array(states));
+}
+
 #[test]
 fn connection_stages_map_to_api_statuses() {
     let cases = [
@@ -724,7 +1069,7 @@ fn connection_stages_map_to_api_statuses() {
         (ConnectionStage::Handshake, "connecting"),
         (ConnectionStage::Identifying, "connecting"),
         (ConnectionStage::Resuming, "resuming"),
-        (ConnectionStage::Disconnected, "disconnected"),
+        (ConnectionStage::Disconnected, "connecting"),
     ];
     for (stage, status) in cases {
         assert_eq!(
