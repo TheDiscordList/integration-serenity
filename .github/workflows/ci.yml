@@ -17,7 +17,7 @@ jobs:
       matrix:
         rust: [stable, '1.74']
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@v7
       - run: rustup toolchain install ${{ matrix.rust }} --profile minimal
       - name: Resolve dependency versions that support Rust 1.74
         if: matrix.rust != 'stable'
@@ -33,7 +33,7 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@v7
       - run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --features webhooks -- -D warnings

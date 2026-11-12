@@ -37,7 +37,7 @@ subtle = { version = "2.4", optional = true, default-features = false }
 
 [dev-dependencies]
 serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "model", "cache", "rustls_backend"] }
-tokio = { version = "1.34", features = ["io-util", "macros", "net", "rt-multi-thread"] }
+tokio = { version = "1.53", features = ["io-util", "macros", "net", "rt-multi-thread"] }
 
 [[example]]
 name = "bot"

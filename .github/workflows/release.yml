@@ -15,7 +15,7 @@ jobs:
       contents: read
       id-token: write # crates.io trusted publishing (OIDC)
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Tag is on main
@@ -44,7 +44,7 @@ jobs:
             "https://crates.io/api/v1/crates/thediscordlist-serenity/${{ steps.version.outputs.version }}"; then
             echo "published=true" >> "$GITHUB_OUTPUT"
           fi
-      - uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+      - uses: rust-lang/crates-io-auth-action@v1.0.6
         if: steps.existing.outputs.published != 'true'
         id: auth
       - if: steps.existing.outputs.published != 'true'
