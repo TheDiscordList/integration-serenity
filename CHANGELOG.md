@@ -29,8 +29,9 @@ All notable changes to this crate are documented here. It follows
 - A panicking `on_event` callback no longer ends the publisher that raised it.
 - `post_stats` before `READY` returns `Skip::NotReady` instead of posting without
   a `shard_count`, which nulled the stored value.
-- The release workflow pins its actions to commit SHAs and refuses a tag that is
-  not on `main`.
+- The release workflow refuses a tag that is not on `main`.
+- The tests and examples build against tokio 1.53, and CI runs on
+  `actions/checkout` v7.
 
 ## 0.2.0
 
